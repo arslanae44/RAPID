@@ -1,0 +1,30 @@
+# Python Derleme Dosyaları
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE ve Editör Ayarları
+.vscode/
+.idea/
+.DS_Store
+
+# ⛔ KRİTİK: PORTABLE İÇİNDEKİ DEVASA SİSTEM VE ÇIKTI DOSYALARI
+# Bu klasörler GitHub'ı şişireceği ve limiti aşacağı için kesinlikle yüklenmez!
+system_files/python_runtime/
+kanat_modeller/
+vsp_evaluation_cache/
+PLOTS/
+
+# VSP Geçici Çıktıları
+*.vsp3
+*.des
+*.adb
+*.pol
+*.fem
+*.txt
+*.csv
+*.log
+*.out
+*.history
+*.png

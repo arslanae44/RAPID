@@ -1,0 +1,13 @@
+# VSPGEOM v3 Tag Key File
+C:\Users\Ahmet Emre\Desktop\Aero\TAI_Planform_Portable\system_files\altc130mod.vspgeom
+2
+
+# part#,geom#,surf#,gname,gid,thick,plate,copy#,geomcopy#
+1,0,0,Wing_C,XASQQFLYNY,0,3,1,1
+2,0,1,Wing_C,XASQQFLYNY,0,3,2,1
+
+2
+
+# tag#,part#,ssname1,ssname2,...,ssid1,ssid2,...
+1,1
+2,2
