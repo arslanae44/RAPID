@@ -1,24 +1,21 @@
-# Python Derleme Dosyaları
+# Python execution caches
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 
-# IDE ve Editör Ayarları
+# Development workspace settings
 .vscode/
 .idea/
 .DS_Store
 
-# ⛔ KRİTİK: PORTABLE İÇİNDEKİ DEVASA SİSTEM VE ÇIKTI DOSYALARI
-# Bu klasörler GitHub'ı şişireceği ve limiti aşacağı için kesinlikle yüklenmez!
+# Large portable binary bundles and local analytics
 system_files/python_runtime/
-kanat_modeller/
-vsp_evaluation_cache/
+system_files/OpenVSP-3.47.0-win64/
+wing_models/
 PLOTS/
 
-# VSP Geçici Çıktıları
-*.vsp3
-*.des
+# Dynamic OpenVSP analytics outputs
 *.adb
 *.pol
 *.fem
@@ -28,3 +25,19 @@ PLOTS/
 *.out
 *.history
 *.png
+*.des
+*.vspgeom
+*.vkey
+*.quad.cases
+*.quad.1.dat
+*.lod
+*.slc
+*.cuts
+*.csf
+*.cases
+
+# Whitelist baseline reference files required to run
+*.vsp3
+*.vspaero
+!system_files/altc130mod.vsp3
+!system_files/altc130mod.vspaero

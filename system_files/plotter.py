@@ -5,8 +5,8 @@ import numpy as np
 
 # ─── PATHS (PORTABLE & DYNAMIC) ───────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORK_DIR   = os.path.dirname(SCRIPT_DIR) # Points to the root TAI_Planform_Portable
-OUTPUT_DIR = os.path.join(WORK_DIR, "kanat_modeller")
+WORK_DIR   = os.path.dirname(SCRIPT_DIR)
+OUTPUT_DIR = os.path.join(WORK_DIR, "wing_models")
 JSON_PATH  = os.path.join(OUTPUT_DIR, "pareto_results.json")
 
 # Create PLOTS directory safely
@@ -14,7 +14,7 @@ PLOTS_DIR  = os.path.join(WORK_DIR, "PLOTS")
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
 def get_incremental_save_path():
-    """Returns plot_1.png, plot_2.png etc without overwriting existing ones."""
+    """Returns sequential filenames for incremental plot persistence."""
     counter = 1
     while True:
         path = os.path.join(PLOTS_DIR, f"plot_{counter}.png")
@@ -22,24 +22,23 @@ def get_incremental_save_path():
             return path
         counter += 1
 
-# ─── SABİT PARAMETRELER ──────────────────────────────────────────────────────
+# ─── GEOMETRY PARAMETERS ──────────────────────────────────────────────────────
 S_REF         = 210.0
 FUSELAGE_Y    = 2.2
 HALF_SPAN_MAX = 25.0
 
-# ─── VERİ YÜKLEME FONKSİYONLARI ──────────────────────────────────────────────
+# ─── DATA LOADING UTILITIES ───────────────────────────────────────────────────
 def load_pareto():
     if not os.path.exists(JSON_PATH):
-        print(f"[HATA] Dosya bulunamadı: {JSON_PATH}")
+        print(f"[ERROR] File not found: {JSON_PATH}")
         return []
     with open(JSON_PATH, "r") as f:
         data = json.load(f)
     return [d for d in data if 0 < d["LD"] < 60 and d["CL"] > 0]
 
 def load_all_history():
-    """Klasördeki tüm alt klasörleri tarayıp BUGÜNE KADAR üretilmiş tüm uçakları çeker."""
+    """Extracts all historical design points from output directories."""
     all_points = []
-    # Hem eski 'wing_*' hem de yeni parametrik 'W*' klasörleri desteklemek için genelleştirildi
     result_files = glob.glob(os.path.join(OUTPUT_DIR, "*", "result.json"))
     
     for path in result_files:
@@ -47,13 +46,12 @@ def load_all_history():
             with open(path, "r") as f:
                 res = json.load(f)
             
-            # Eğer analiz hatasız bittiyse ve veriler mevcutsa
             if res.get("error") is None and res.get("CL") is not None:
                 cl = res["CL"]
                 ld = res["LD"]
                 cm = abs(res.get("CM", 0.0))
                 
-                # Temel geçerlilik sınırları (aşırı patlakları grafikten gizle)
+                # Eliminate outlier points
                 if 0.0 < cl < 3.0 and -5.0 < ld < 60.0:
                     is_feas = (0.15 <= cl) and (ld >= 15.0) and (cm <= 0.35)
                     all_points.append({"CL": cl, "LD": ld, "feasible": is_feas})
@@ -62,7 +60,7 @@ def load_all_history():
             
     return all_points
 
-# ─── PLANFORM POLİGONU ────────────────────────────────────────────────────────
+# ─── PLANFORM POLYGON ─────────────────────────────────────────────────────────
 def calc_wing_polygon(d):
     AR        = d["AR"]
     kink_frac = d["kink_frac"]
@@ -97,34 +95,32 @@ def calc_wing_polygon(d):
 
     return lx + rx, ly + ry
 
-# ─── ANA PLOT (BEYAZ TEMA & TÜM GEÇMİŞ) ──────────────────────────────────────
+# ─── DASHBOARD PLOTTER ────────────────────────────────────────────────────────
 def plot_dashboard(pareto, all_pop):
     N = len(pareto)
     if N == 0:
-        print("[UYARI] Gösterilecek Pareto çözümü yok.")
+        print("[WARNING] No Pareto solutions found to display.")
         return
 
     colors = plt.cm.turbo(np.linspace(0.1, 0.9, N))
     
-    # İnteraktif takip listeleri
+    # Interactive tracking collections
     scatter_elements = []
     wing_axes = []
-    info_text_objects = [] # Ekranda sade göstermek için saklanacak
+    info_text_objects = []
 
-    n_cols = 8  # Number of columns for wing plots at the bottom (User requested 8 in a row!)
+    n_cols = 8
     n_rows = int(np.ceil(N / n_cols))
 
-    # Figür ayarları (Ekstra Geniş Yatay Konsept - BEYAZ TEMA)
     fig_height = 7.0 + (3.2 * n_rows)
     fig = plt.figure(figsize=(24, fig_height), facecolor="white")
     
-    # Row 0 is Pareto chart, Rows 1..n is for wing grids
     height_ratios = [2.5] + [1.0] * n_rows
     gs = gridspec.GridSpec(1 + n_rows, n_cols, height_ratios=height_ratios, hspace=0.4, wspace=0.25)
 
     ax_pareto = fig.add_subplot(gs[0, :])
 
-    # 1. Önce TÜM GEÇMİŞİ çiz (Sağlayanlar yeşil, kısıt ihlali yapanlar kırmızı)
+    # Plot broad candidate cloud
     if all_pop:
         feas_cl = [p["CL"] for p in all_pop if p.get("feasible", True)]
         feas_ld = [p["LD"] for p in all_pop if p.get("feasible", True)]
@@ -136,14 +132,14 @@ def plot_dashboard(pareto, all_pop):
             ax_pareto.scatter(
                 infeas_cl, infeas_ld,
                 color="#ffa8a8", s=25, zorder=1, edgecolors="none", alpha=0.35,
-                label=f"Kısıt İhlali Yapanlar ({len(infeas_cl)} adet)"
+                label=f"Violated Constraints ({len(infeas_cl)})"
             )
         
         if feas_cl:
             ax_pareto.scatter(
                 feas_cl, feas_ld,
                 color="#a3e2a3", s=30, zorder=1, edgecolors="none", alpha=0.50,
-                label=f"Uygun Geçmiş Tasarımlar ({len(feas_cl)} adet)"
+                label=f"Feasible History ({len(feas_cl)})"
             )
 
     # 2. Pareto cephesi bağlantı çizgisi
@@ -170,9 +166,9 @@ def plot_dashboard(pareto, all_pop):
             color="black", fontsize=8, fontweight="normal", va="bottom", ha="left"
         )
 
-    ax_pareto.axhline(15.0, color="red", linestyle=":", linewidth=1.5, alpha=0.8, label="Min L/D = 15 Sınırı")
+    ax_pareto.axhline(15.0, color="red", linestyle=":", linewidth=1.5, alpha=0.8, label="Min L/D = 15 Boundary")
     ax_pareto.set_facecolor("#fcfcfc")
-    ax_pareto.set_title("Pareto Front ve Optimizasyon Geçmişi",
+    ax_pareto.set_title("Pareto Front & Optimization History",
                          fontsize=15, fontweight="bold", color="black", pad=15)
     ax_pareto.set_xlabel("CL", fontsize=13, color="black", fontweight="bold")
     ax_pareto.set_ylabel("L/D", fontsize=13, color="black", fontweight="bold")
@@ -182,7 +178,7 @@ def plot_dashboard(pareto, all_pop):
         spine.set_edgecolor("black")
         spine.set_linewidth(1.2)
         
-    # Pareto cephesine sıkı zoom yaparak ekranı tam odaklı hale getir
+    # Tight boundary zoom onto dynamic Pareto sets
     if pareto:
         p_cl = [d["CL"] for d in pareto]
         p_ld = [d["LD"] for d in pareto]
@@ -199,10 +195,9 @@ def plot_dashboard(pareto, all_pop):
         ax_pareto.set_xlim(left=min_cl - pad_cl, right=max_cl + pad_cl)
         ax_pareto.set_ylim(bottom=min_ld - pad_ld, top=max_ld + pad_ld)
 
-    # ax_pareto.legend(fontsize=10, loc="best", facecolor="white", edgecolor="black", labelcolor="black")
     ax_pareto.grid(True, linestyle="--", alpha=0.6, color="#cccccc")
 
-    # ── Planform panelleri (BEYAZ TEMA) ──
+    # ── Planform Subpanels ──
     for i, (d, color) in enumerate(zip(pareto, colors)):
         r = 1 + (i // n_cols)
         c = i % n_cols
@@ -213,7 +208,7 @@ def plot_dashboard(pareto, all_pop):
         x, y = calc_wing_polygon(d)
         ax.fill(x, y, color=color, alpha=0.8, edgecolor="black", linewidth=1.5)
 
-        # Gövde merkez bloğu
+        # Fuselage centerline block
         ax.fill(
             [-FUSELAGE_Y, FUSELAGE_Y, FUSELAGE_Y, -FUSELAGE_Y],
             [0, 0, -8, -8],
@@ -230,14 +225,13 @@ def plot_dashboard(pareto, all_pop):
         for spine in ax.spines.values():
             spine.set_edgecolor("gray")
 
-        # Kanat boyutları bilgisi kutusu
+        # Structural/Aerodynamic text captures
         factor = 0.5*(1+d["t_inner"])*(d["kink_frac"]*(b_half-FUSELAGE_Y)) + \
                  0.5*d["t_inner"]*(1+d["t_outer"])*((1-d["kink_frac"])*(b_half-FUSELAGE_Y))
         c_root = (S_REF / 2.0) / factor
         c_kink = d["t_inner"] * c_root
         c_tip  = d["t_outer"] * c_kink
         
-        # Generate matching pretty name representation
         b_ref      = 2.0 * b_half
         ar_val     = int(round(d["AR"] * 10))
         span_val   = int(round(b_ref))
@@ -263,11 +257,11 @@ def plot_dashboard(pareto, all_pop):
             fontsize=10, fontweight="bold", color="black", pad=4
         )
 
-    # ── İNTERAKTİF HOVER EFEKTİ (MÜKEMMEL KULLANICI DENEYİMİ!) ───
+    # ─── INTERACTIVE HOVER DYNAMICS ───────────────────────────────────────────
     def on_motion(event):
         changed = False
         
-        # 1. Önce her şeyi varsayılana sıfırla
+        # 1. Revert states
         for idx, sc in enumerate(scatter_elements):
             if sc.get_sizes()[0] != 90:
                 sc.set_sizes([90])
@@ -287,23 +281,21 @@ def plot_dashboard(pareto, all_pop):
                 fig.canvas.draw_idle()
             return
         
-        # 2. DURUM A: Alttaki ufak kanat grafiklerinden birinin üzerindeysek
+        # Highlight on hovering wing subpanel
         if event.inaxes in wing_axes:
             idx = wing_axes.index(event.inaxes)
-            # Tepedeki Pareto noktasını büyüt ve altın sarısı parlat!
             sc = scatter_elements[idx]
             sc.set_sizes([400])
             sc.set_edgecolor("gold")
             sc.set_linewidths([4.0])
-            sc.set_zorder(100)  # En öne getir
+            sc.set_zorder(100)
             
-            # Üzerinde durduğumuz kanat karesinin çerçevesini altın yap!
             for spine in event.inaxes.spines.values():
                 spine.set_edgecolor("gold")
                 spine.set_linewidth(2.5)
             changed = True
             
-        # 3. DURUM B: Tepedeki Pareto grafiğinin içindeki noktalardan birinin üzerindeysek
+        # Highlight on hovering scatter node
         elif event.inaxes == ax_pareto:
             for idx, sc in enumerate(scatter_elements):
                 cont, ind = sc.contains(event)
@@ -313,7 +305,6 @@ def plot_dashboard(pareto, all_pop):
                     sc.set_linewidths([4.0])
                     sc.set_zorder(100)
                     
-                    # İlgili kanat görselinin çerçevesini altın yap!
                     target_ax = wing_axes[idx]
                     for spine in target_ax.spines.values():
                         spine.set_edgecolor("gold")
@@ -324,29 +315,28 @@ def plot_dashboard(pareto, all_pop):
         if changed:
             fig.canvas.draw_idle()
             
-    # Fare hareketlerini dinleyen callback fonksiyonunu bağla
     fig.canvas.mpl_connect("motion_notify_event", on_motion)
 
     save_path = get_incremental_save_path()
     plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
-    print(f"[✓] Görsel beyaz temayla kaydedildi: {save_path}")
+    print(f"[✓] Chart saved: {save_path}")
     
-    # Ekran penceresinde karışıklığı engellemek için detayları gizle, sadece tipi yaz!
+    # Condense text displays to type only prior to window rendering to protect visibility
     for t_box, pretty_name in info_text_objects:
         t_box.set_text(pretty_name)
         t_box.set_fontsize(9)
         
     plt.show()
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────
+# ─── MAIN EXECUTION ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     pareto_data = load_pareto()
     all_population_data = load_all_history()
     
     if pareto_data:
-        print(f"[✓] {len(pareto_data)} Pareto çözümü yüklendi.")
+        print(f"[✓] Loaded {len(pareto_data)} Pareto solutions.")
         if all_population_data:
-            print(f"[✓] Bugüne kadar değerlendirilen toplam {len(all_population_data)} tasarım bulundu ve arka plana eklenecek.")
+            print(f"[✓] Loaded {len(all_population_data)} historical candidate evaluations.")
         plot_dashboard(pareto_data, all_population_data)
     else:
-        print("[!] Geçerli Pareto verisi yok. Optimizasyon tamamlandı mı?")
+        print("[!] No valid Pareto data available. Has optimization completed?")

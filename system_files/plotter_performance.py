@@ -5,8 +5,8 @@ import numpy as np
 
 # ─── PATHS (PORTABLE & DYNAMIC) ───────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORK_DIR   = os.path.dirname(SCRIPT_DIR) # Points to the root TAI_Planform_Portable
-OUTPUT_DIR = os.path.join(WORK_DIR, "kanat_modeller")
+WORK_DIR   = os.path.dirname(SCRIPT_DIR)
+OUTPUT_DIR = os.path.join(WORK_DIR, "wing_models")
 JSON_PATH  = os.path.join(OUTPUT_DIR, "pareto_results.json")
 
 # Create PLOTS directory safely
@@ -22,29 +22,29 @@ def get_incremental_save_path():
             return path
         counter += 1
 
-# ─── SABİT PARAMETRELER ──────────────────────────────────────────────────────
+# ─── GEOMETRY PARAMETERS ──────────────────────────────────────────────────────
 S_REF         = 210.0
 FUSELAGE_Y    = 2.2
 HALF_SPAN_MAX = 25.0
 
-# ─── VERİ YÜKLEME VE HESAPLAMA ───────────────────────────────────────────────
+# ─── DATA LOADING & PROCESSING ───────────────────────────────────────────────
 def load_pareto():
     if not os.path.exists(JSON_PATH):
-        print(f"[HATA] Dosya bulunamadı: {JSON_PATH}")
+        print(f"[ERROR] File not found: {JSON_PATH}")
         return []
     with open(JSON_PATH, "r") as f:
         data = json.load(f)
     valid = []
     for d in data:
         if 0 < d["LD"] < 60 and d["CL"] > 0:
-            # Performans parametrelerini ekle
+            # Compute performance metrics
             d["EnduranceFactor"] = np.sqrt(d["CL"]) * d["LD"]  # CL^1.5 / CD
             d["RangeFactor"]     = d["LD"]                     # CL / CD
             valid.append(d)
     return valid
 
 def load_all_history():
-    """Geçmiş veriyi yükler ve performans parametrelerini hesaplar."""
+    """Retrieves data subsets and derives historical performance factors."""
     all_points = []
     result_files = glob.glob(os.path.join(OUTPUT_DIR, "*", "result.json"))
     
@@ -70,7 +70,7 @@ def load_all_history():
             
     return all_points
 
-# ─── PLANFORM POLİGONU ────────────────────────────────────────────────────────
+# ─── PLANFORM POLYGON ─────────────────────────────────────────────────────────
 def calc_wing_polygon(d):
     AR        = d["AR"]
     kink_frac = d["kink_frac"]
@@ -105,11 +105,11 @@ def calc_wing_polygon(d):
 
     return lx + rx, ly + ry
 
-# ─── ANA PLOT ────────────────────────────────────────────────────────────────
+# ─── PERFORMANCE PLOTTER ──────────────────────────────────────────────────────
 def plot_performance_dashboard(pareto, all_pop):
     N = len(pareto)
     if N == 0:
-        print("[UYARI] Gösterilecek Pareto çözümü yok.")
+        print("[WARNING] No Pareto solutions found to display.")
         return
 
     colors = plt.cm.turbo(np.linspace(0.1, 0.9, N))
@@ -128,7 +128,7 @@ def plot_performance_dashboard(pareto, all_pop):
 
     ax_pareto = fig.add_subplot(gs[0, :])
 
-    # 1. TÜM GEÇMİŞİ ÇİZ (X: Range, Y: Endurance)
+    # 1. Plot entire history
     if all_pop:
         feas_x = [p["RangeFactor"] for p in all_pop if p.get("feasible", True)]
         feas_y = [p["EnduranceFactor"] for p in all_pop if p.get("feasible", True)]
@@ -150,7 +150,7 @@ def plot_performance_dashboard(pareto, all_pop):
                 label="Feasible History Designs"
             )
 
-    # 2. Pareto Cephesi Bağlantı Çizgisi
+    # 2. Connective boundary
     sorted_p = sorted(pareto, key=lambda x: x["RangeFactor"])
     ax_pareto.plot(
         [d["RangeFactor"] for d in sorted_p],
@@ -158,7 +158,7 @@ def plot_performance_dashboard(pareto, all_pop):
         color="black", linestyle="--", linewidth=1.5, alpha=0.5, zorder=2
     )
 
-    # 3. Pareto Noktaları
+    # 3. Optimal nodes
     for i, (d, color) in enumerate(zip(pareto, colors)):
         sc = ax_pareto.scatter(
             d["RangeFactor"], d["EnduranceFactor"],
@@ -184,7 +184,7 @@ def plot_performance_dashboard(pareto, all_pop):
         spine.set_edgecolor("black")
         spine.set_linewidth(1.2)
         
-    # Dinamik zoom çerçevesi
+    # Tight dynamic viewport focus
     if pareto:
         p_x = [d["RangeFactor"] for d in pareto]
         p_y = [d["EnduranceFactor"] for d in pareto]
@@ -203,7 +203,7 @@ def plot_performance_dashboard(pareto, all_pop):
 
     ax_pareto.grid(True, linestyle="--", alpha=0.6, color="#cccccc")
 
-    # ── Planform panelleri ──
+    # ── Planform subpanels ──
     for i, (d, color) in enumerate(zip(pareto, colors)):
         r = 1 + (i // n_cols)
         c = i % n_cols
@@ -230,7 +230,6 @@ def plot_performance_dashboard(pareto, all_pop):
         for spine in ax.spines.values():
             spine.set_edgecolor("gray")
 
-        # Kanat boyutları bilgisi kutusu
         factor = 0.5*(1+d["t_inner"])*(d["kink_frac"]*(b_half-FUSELAGE_Y)) + \
                  0.5*d["t_inner"]*(1+d["t_outer"])*((1-d["kink_frac"])*(b_half-FUSELAGE_Y))
         c_root = (S_REF / 2.0) / factor
@@ -262,7 +261,7 @@ def plot_performance_dashboard(pareto, all_pop):
             fontsize=10, fontweight="bold", color="black", pad=4
         )
 
-    # ── İNTERAKTİF HOVER EFEKTİ ──
+    # ─── INTERACTIVE HOVER DYNAMICS ───
     def on_motion(event):
         changed = False
         for idx, sc in enumerate(scatter_elements):
@@ -317,9 +316,9 @@ def plot_performance_dashboard(pareto, all_pop):
 
     save_path = get_incremental_save_path()
     plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
-    print(f"[✓] Performans odaklı görsel kaydedildi: {save_path}")
+    print(f"[✓] Performance map saved: {save_path}")
     
-    # Ekran pencerelerinde yazıların karmaşık durmaması için detayları gizle, sadece tipi göster!
+    # Filter displays for interactive visibility
     for t_box, pretty_name in info_text_objects:
         t_box.set_text(pretty_name)
         t_box.set_fontsize(9)
@@ -331,7 +330,7 @@ if __name__ == "__main__":
     all_population_data = load_all_history()
     
     if pareto_data:
-        print(f"[✓] {len(pareto_data)} Pareto çözümü yüklendi (Performans faktörleri hesaplandı).")
+        print(f"[✓] Loaded {len(pareto_data)} performance solutions.")
         plot_performance_dashboard(pareto_data, all_population_data)
     else:
-        print("[!] Geçerli Pareto verisi yok.")
+        print("[!] No valid Pareto data available.")

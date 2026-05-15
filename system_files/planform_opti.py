@@ -43,19 +43,19 @@ from pymoo.util.display.column import Column
 os.environ["OMP_NUM_THREADS"] = "1"
 
 # ─── PORTABLE PATH CONFIGURATION ──────────────────────────────────────────────
-# Everything is derived dynamically from the script's location to ensure zero configuration
+# Dynamic derivation ensures zero-configuration relative paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR   = os.path.dirname(SCRIPT_DIR)
 VSP_ROOT   = os.path.join(SCRIPT_DIR, "OpenVSP-3.47.0-win64")
 
-# ─── UÇUŞ KOŞULLARI ─────────────────────────────────────────────────────────
+# ─── FLIGHT CONDITIONS ────────────────────────────────────────────────────────
 V_MS   = 600.0 / 3.6
 RHO    = 0.7364
 TEMP_K = 255.7
 MACH   = V_MS / np.sqrt(1.4 * 287.05 * TEMP_K)
 MU     = 1.628e-5
 
-# ─── SABİT PARAMETRELER ──────────────────────────────────────────────────────
+# ─── DESIGN CONSTANTS ─────────────────────────────────────────────────────────
 S_REF         = 210.0
 AOA           = 1.0
 INCIDENCE     = 3.0
@@ -64,7 +64,7 @@ HALF_SPAN_MAX = 25.0
 AIRFOIL       = "naca2412"
 
 VSP_FILE   = os.path.join(SCRIPT_DIR, "altc130mod.vsp3")
-OUTPUT_DIR = os.path.join(WORK_DIR, "kanat_modeller")
+OUTPUT_DIR = os.path.join(WORK_DIR, "wing_models")
 
 C_ROOT_MIN, C_ROOT_MAX = 4.0, 9.5
 
@@ -104,27 +104,27 @@ def chord_from_geometry(AR, kink_frac, t_inner, t_outer):
     mac = (mi*S_i + mo*S_o) / (S_i + S_o)
     return c_root, c_kink, c_tip, b_half, b_kink, mac
 
-# ─── SONUÇLARI KAYDET ────────────────────────────────────────────────────────
+# ─── RESULTS PERSISTENCE ──────────────────────────────────────────────────────
 def save_results(algorithm, res=None):
-    """Checkpoint ve JSON'u kaydet. res yoksa algorithm.opt'tan okur."""
+    """Checkpoint and JSON exporter. Auto-extracts opt from algorithm state."""
     ckpt_file = os.path.join(OUTPUT_DIR, "checkpoint.pkl")
     try:
         with open(ckpt_file, "wb") as f:
             pickle.dump(algorithm, f)
-        print(f"\n[✓] Checkpoint kaydedildi: {ckpt_file}")
+        print(f"\n[✓] Checkpoint saved: {ckpt_file}")
     except Exception as e:
-        print(f"\n[!] Checkpoint kaydedilemedi: {e}")
+        print(f"\n[!] Checkpoint failed to save: {e}")
 
-    # Nesil geçmişini ayrıca kaydet (görselleştirici için)
+    # Save history for external plotting modules
     history_file = os.path.join(OUTPUT_DIR, "history.pkl")
     try:
         hist = getattr(algorithm, "history", None)
         if hist:
             with open(history_file, "wb") as f:
                 pickle.dump(hist, f)
-            print(f"[✓] {len(hist)} nesil geçmişi kaydedildi: {history_file}")
+            print(f"[✓] {len(hist)} generation history saved: {history_file}")
     except Exception as e:
-        print(f"[!] Geçmiş kaydedilemedi: {e}")
+        print(f"[!] History failed to save: {e}")
 
     try:
         if res is not None and res.F is not None:
@@ -134,7 +134,7 @@ def save_results(algorithm, res=None):
             X = algorithm.opt.get("X")
             G = algorithm.opt.get("G")
         else:
-            print("[!] Kaydedilecek Pareto çözümü yok.")
+            print("[!] No Pareto solutions found to save.")
             return
 
         final_results = []
@@ -143,7 +143,7 @@ def save_results(algorithm, res=None):
             if f[0] == 999.0:
                 continue
             
-            # Sadece kısıtları tam sağlayan (feasible) gerçek çözümleri kaydet
+            # Store strictly feasible designs only
             if G is not None:
                 cv = np.sum(np.maximum(G[i], 0.0))
                 if cv > 1e-6:
@@ -165,7 +165,7 @@ def save_results(algorithm, res=None):
         json_path = os.path.join(OUTPUT_DIR, "pareto_results.json")
         with open(json_path, "w") as f:
             json.dump(final_results, f, indent=2)
-        print(f"[✓] {len(final_results)} Pareto çözümü kaydedildi: {json_path}")
+        print(f"[✓] {len(final_results)} Pareto solutions saved: {json_path}")
 
         if final_results:
             print(f"\n{'#':>4} {'CL':>8} {'L/D':>8} {'AR':>7} {'kink':>7} "
@@ -179,7 +179,7 @@ def save_results(algorithm, res=None):
             print("=" * 70)
 
     except Exception as e:
-        print(f"[!] JSON kaydedilemedi: {e}")
+        print(f"[!] JSON failed to save: {e}")
 
 # ─── SUBPROCESS WORKER BETİĞİ ────────────────────────────────────────────────
 WORKER_SCRIPT = r"""
@@ -400,17 +400,17 @@ def write_worker_script():
     with open(WORKER_SCRIPT_PATH, "w", encoding="utf-8") as f:
         f.write(WORKER_SCRIPT)
 
-# ─── MULTIPROCESSING INIT & LAUNCH LOCK ─────────────────────────────────────
+# ─── MULTIPROCESSING INIT & LAUNCH LOCK ───────────────────────────────────────
 launch_lock = None
 
 def init_worker(l):
     global launch_lock
     launch_lock = l
-    # Havuz işçilerinin Ctrl+C sinyalini görmezden gelmesini sağlayarak konsol kirliliğini (Traceback) önleriz
+    # Prevent pool workers from cluttering console tracebacks on Ctrl+C
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 def evaluate_subprocess(x, wake_iterations=4):
-    # Pymoo eşitlikte çökmesin diye başarısız uçaklara rastgele küsuratlı ceza veriyoruz
+    # Apply randomized fallback penalties for failed geometries
     def get_penalty():
         p = 999.0 + random.uniform(0.01, 5.0)
         return {"F": [p, p], "G": [p, p, p]}
@@ -423,7 +423,7 @@ def evaluate_subprocess(x, wake_iterations=4):
     c_root, c_kink, c_tip, b_half, b_kink, mac = geo
     b_ref = 2.0 * b_half
 
-    # ─── PARAMETRİK KANAT İSİMLENDİRME ───────────────────────────────────────
+    # ─── GEOMETRIC LABEL GENERATION ───────────────────────────────────────────
     ar_val     = int(round(AR * 10))
     span_val   = int(round(b_ref))
     kink_val   = int(round(kink_frac * 10))
@@ -432,10 +432,10 @@ def evaluate_subprocess(x, wake_iterations=4):
     t_in_val   = int(round(t_inner * 10))
     t_out_val  = int(round(t_outer * 10))
 
-    # Konsol için şık görsel etiket (örn: W92/40/4/3-3/5-2)
+    # Descriptive console tag (e.g. W92/40/4/3-3/5-2)
     pretty_name = f"W{ar_val}/{span_val}/{kink_val}/{sw_in_val}-{sw_out_val}/{t_in_val}-{t_out_val}"
     
-    # Dosya sistemi için güvenli etiket (Klasör çarpışmasını engellemek için sonuna kısa UUID eklenir)
+    # Unique directory name appended with short UUID hash
     safe_label = f"W{ar_val}_{span_val}_{kink_val}_{sw_in_val}-{sw_out_val}_{t_in_val}-{t_out_val}"
     unique_id  = uuid.uuid4().hex[:6]
     name       = f"{safe_label}_{unique_id}"
@@ -445,10 +445,10 @@ def evaluate_subprocess(x, wake_iterations=4):
 
     local_base_vsp = os.path.join(run_dir, "altc130mod_local.vsp3")
     
-    # Only copy the base geometry model file (no solver binaries/dlls needed!)
+    # Define base model copy parameters
     copy_tasks = [(VSP_FILE, local_base_vsp, "Base VSP")]
 
-    # Robust bulk file copying with Windows concurrent locking handlers
+    # File operations safeguarded against simultaneous read locks
     for target_src, target_dst, label in copy_tasks:
         if os.path.exists(target_src):
             success = False
@@ -461,7 +461,7 @@ def evaluate_subprocess(x, wake_iterations=4):
                     time.sleep(0.03 + random.random() * 0.07)
             
             if not success:
-                print(f"\n[!] Kritik dosya kopyalanamadi ({label})")
+                print(f"\n[!] Critical file copy failed ({label})")
                 return get_penalty()
 
     params = {
@@ -476,25 +476,24 @@ def evaluate_subprocess(x, wake_iterations=4):
     with open(params_file, "w") as f:
         json.dump(params, f)
 
-    # Dynamically inject current standalone python's site-packages into worker load path
+    # Pass stand-alone packages into subprocess syspath
     import sysconfig
     venv_site = sysconfig.get_path("purelib")
         
     final_worker_script = f"import sys; sys.path.insert(0, r'{venv_site}')\n" + WORKER_SCRIPT
 
-    # Bypass Windows venv concurrent shim lock by spawning the REAL base python binary directly
+    # Spawn primary binary directly
     python_bin = getattr(sys, "_base_executable", sys.executable)
 
     cmd = [python_bin, "-",
            VSP_ROOT, run_dir, params_file, result_file]
     env = os.environ.copy()
     env["OMP_NUM_THREADS"] = "1"
-    env["PYTHONDONTWRITEBYTECODE"] = "1"  # Prevents parallel pycache writing locks on Windows
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
 
-    # Stagger worker startup to prevent simultaneous dynamic loading collisions on _vsp.pyd
+    # Stagger worker load timers
     time.sleep(random.random() * 2.0)
 
-    # Outer execution retry loop to handle rare Windows shim/antivirus locking during process launch
     exec_success = False
     for attempt in range(5):
         proc = None
@@ -503,43 +502,38 @@ def evaluate_subprocess(x, wake_iterations=4):
             if launch_lock is not None:
                 launch_lock.acquire()
             try:
-                # Serialized initialization window to completely prevent simultaneous OS loader collisions
+                # Protect Windows dynamic loader bindings
                 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
                 proc.stdin.write(final_worker_script)
                 proc.stdin.flush()
                 proc.stdin.close()
-                # Gives Windows exactly 250ms to link DLLs and construct the process safely
                 time.sleep(0.25)
             finally:
                 if launch_lock is not None:
                     launch_lock.release()
             
-            # Run in fully parallel asynchronous mode
             try:
                 stdout, stderr = proc.communicate(timeout=300)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 stdout, stderr = proc.communicate()
-                print("\n[!] Alt surec zaman asimina ugradi.")
+                print("\n[!] Subprocess timed out.")
                 break
 
-            # Check for success or identifiable Windows sharing violations
             if proc.returncode == 0 and os.path.exists(result_file):
                 exec_success = True
                 break
             else:
                 err_msg = f"{stderr or ''} {stdout or ''}"
                 if "being used by another process" in err_msg.lower() or "access is denied" in err_msg.lower() or not os.path.exists(result_file):
-                    # Sleep and retry transparently
                     time.sleep(0.5 + random.random() * 1.5)
                     continue
                 else:
-                    # Real fatal script crash (syntax/logic error)
-                    print(f"\n[!] Alt surec mantiksal hata ile coktu:\n{stderr}\n{stdout}")
+                    print(f"\n[!] Subprocess crash output:\n{stderr}\n{stdout}")
                     break
                     
         except Exception as e:
-            print(f"\n[!] Python subprocess hatasi: {e}")
+            print(f"\n[!] Subprocess execution error: {e}")
             if proc is not None:
                 try: proc.kill()
                 except: pass
@@ -548,7 +542,6 @@ def evaluate_subprocess(x, wake_iterations=4):
     if not exec_success:
         return get_penalty()
 
-    # Robust result load with Windows OS lock backoff
     res = None
     for attempt in range(20):
         try:
@@ -569,7 +562,7 @@ def evaluate_subprocess(x, wake_iterations=4):
     LD = res["LD"]
     CM = abs(res["CM"])
 
-    # Filtre: Negatif CL veya L/D görüldüğü anda direkt elenir
+    # Eliminate non-physical diverging configurations
     if LD > 60.0 or LD <= 0.0 or CL <= 0.0 or CL > 0.7:
         return get_penalty()
 
@@ -579,8 +572,8 @@ def evaluate_subprocess(x, wake_iterations=4):
     f1 = -CL
     f2 = -LD
     g1 = LD_MIN - LD   # L/D >= 15
-    g2 = CM - CM_MAX   # CM <= 0.30
-    g3 = CL_MIN - CL   # CL >= 0.20
+    g2 = CM - CM_MAX   # CM <= 0.35
+    g3 = CL_MIN - CL   # CL >= 0.15
     return {"F": [f1, f2], "G": [g1, g2, g3]}
 
 # ─── OPTİMİZASYON PROBLEMİ ───────────────────────────────────────────────────
@@ -700,7 +693,7 @@ class WingDisplay(Display):
 # ─── FLUSH CALLBACK ──────────────────────────────────────────────────────────
 class FlushCallback(Callback):
     def notify(self, algorithm):
-        # Pickle/Checkpoint'ten yüklenen eski versiyon tabloların yeni sütunları ezmesini önlemek için agresif doğrulama
+        # Validate and restore modern display table structures on checkpoint load
         if not isinstance(algorithm.display, WingDisplay) or not hasattr(algorithm.display, "cv_min"):
             old_prev = getattr(algorithm.display, "prev_ideal", None)
             algorithm.display = WingDisplay()
@@ -708,8 +701,8 @@ class FlushCallback(Callback):
                 algorithm.display.prev_ideal = old_prev
             
         sys.stdout.flush()
-        # Bu kanca, her nesil tamamlandığında Pymoo'nun tablo sütun başlıklarını 
-        # doğrudan sayısal değerlerin TEPEYE (hemen üstüne) basmasını sağlar.
+        
+        # Hook into Pymoo's stdout mechanism to append dynamic table headers sequentially
         if not hasattr(self, "_patched"):
             try:
                 disp_cls  = type(algorithm.display)
@@ -717,7 +710,7 @@ class FlushCallback(Callback):
                 
                 def custom_call(self_disp, *args, **kwargs):
                     try:
-                        # Pymoo'nun orijinal başlığını direkt buraya basarak sıradaki satırla eşler
+                        # Print boundary-aligned column labels prior to metric outputs
                         if hasattr(self_disp, 'output') and self_disp.output:
                             header_str = self_disp.output.header(border=True)
                             if header_str:
@@ -735,19 +728,19 @@ class FlushCallback(Callback):
         save_results(algorithm)
         sys.stdout.flush()
 
-# ─── ÇALIŞTIRMA BLOĞU ────────────────────────────────────────────────────────
+# ─── MAIN LAUNCHER ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import openvsp as vsp
     print("VSP Version: " + str(vsp.GetVSPVersion()))
     
     print("=" * 70)
-    print(f"Kısıtlar: L/D >= {LD_MIN} | CM <= {CM_MAX} | CL >= {CL_MIN}")
+    print(f"Constraints: L/D >= {LD_MIN} | CM <= {CM_MAX} | CL >= {CL_MIN}")
     print("=" * 70)
 
-    # ─── KULLANICI SEÇİMLERİ (ÇEKİRDEK & NESİL BOYUTU) ───────────────────────
+    # ─── CORE SELECTION ───────────────────────────────────────────────────────
     default_cores = 32
     while True:
-        core_input = input(f"\nKaç çekirdekte (core) çalışmak istiyorsunuz? (Enter = varsayılan {default_cores}): ").strip()
+        core_input = input(f"\nNumber of CPU cores to use? (Enter = default {default_cores}): ").strip()
         if not core_input:
             num_cores = default_cores
             break
@@ -755,14 +748,14 @@ if __name__ == "__main__":
             num_cores = int(core_input)
             if num_cores > 0:
                 break
-            print("    Lütfen pozitif bir sayı girin.")
+            print("    Please enter a positive integer.")
         except ValueError:
-            print("    Geçersiz giriş, lütfen tam sayı yazın.")
+            print("    Invalid input, please enter an integer.")
 
-    # ─── WAKE ITERATION SEÇİMİ ───────────────────────────────────────────────
+    # ─── WAKE ITERATION SELECTION ─────────────────────────────────────────────
     default_wake = 0
     while True:
-        wake_input = input(f"VSPAERO Wake Iteration sayısı kaç olsun? (Enter = varsayılan {default_wake}): ").strip()
+        wake_input = input(f"VSPAERO Wake Iteration count? (Enter = default {default_wake}): ").strip()
         if not wake_input:
             wake_iterations = default_wake
             break
@@ -770,41 +763,41 @@ if __name__ == "__main__":
             wake_iterations = int(wake_input)
             if wake_iterations >= 0:
                 break
-            print("    Lütfen pozitif bir sayı veya 0 girin.")
+            print("    Please enter a positive integer or 0.")
         except ValueError:
-            print("    Geçersiz giriş, lütfen tam sayı yazın.")
+            print("    Invalid input, please enter an integer.")
 
     ckpt_file   = os.path.join(OUTPUT_DIR, "checkpoint.pkl")
     ckpt_exists = os.path.exists(ckpt_file)
 
     if ckpt_exists:
         current_gen_preview = getattr(pickle.load(open(ckpt_file, "rb")), "n_iter", 0)
-        print(f"\n[i] Mevcut checkpoint bulundu — {current_gen_preview}. nesil tamamlanmış.")
+        print(f"\n[i] Existing checkpoint found — generation {current_gen_preview} completed.")
         
-        # Pop size checkpoint'ten yükleneceği için kullanıcıyı bilgilendiriyoruz
+        # Extract and inform population metrics from restored state
         with open(ckpt_file, "rb") as f:
             temp_alg = pickle.load(f)
-            active_pop = getattr(temp_alg, "pop_size", "Bilinmiyor")
-        print(f"[i] Popülasyon boyutu checkpoint'ten yüklenecek: {active_pop} kanat")
+            active_pop = getattr(temp_alg, "pop_size", "Unknown")
+        print(f"[i] Population size restored from checkpoint: {active_pop} wings")
 
         while True:
             try:
-                extra_input = input("Kaç nesil DAHA çalıştırmak istiyorsunuz? (Enter = varsayılan 10): ").strip()
+                extra_input = input("How many MORE generations do you wish to run? (Enter = default 10): ").strip()
                 if not extra_input:
                     extra = 10
                     break
                 extra = int(extra_input)
                 if extra > 0:
                     break
-                print("    Lütfen pozitif bir sayı girin.")
+                print("    Please enter a positive integer.")
             except ValueError:
-                print("    Geçersiz giriş, lütfen tam sayı yazın.")
+                print("    Invalid input, please enter an integer.")
     else:
-        print("\n[i] Checkpoint yok — yeni optimizasyon başlatılacak.")
+        print("\n[i] No checkpoint found — starting fresh optimization.")
         
         default_pop = 32
         while True:
-            pop_input = input(f"Bir nesilde kaç kanat olsun? (pop_size) (Enter = varsayılan {default_pop}): ").strip()
+            pop_input = input(f"Wings per generation (pop_size)? (Enter = default {default_pop}): ").strip()
             if not pop_input:
                 pop_size = default_pop
                 break
@@ -812,24 +805,24 @@ if __name__ == "__main__":
                 pop_size = int(pop_input)
                 if pop_size > 0:
                     break
-                print("    Lütfen pozitif bir sayı girin.")
+                print("    Please enter a positive integer.")
             except ValueError:
-                print("    Geçersiz giriş, lütfen tam sayı yazın.")
+                print("    Invalid input, please enter an integer.")
 
         while True:
             try:
-                extra_input = input("Kaç nesil çalıştırmak istiyorsunuz? (Enter = varsayılan 20): ").strip()
+                extra_input = input("How many generations do you wish to run? (Enter = default 20): ").strip()
                 if not extra_input:
                     extra = 20
                     break
                 extra = int(extra_input)
                 if extra > 0:
                     break
-                print("    Lütfen pozitif bir sayı girin.")
+                print("    Please enter a positive integer.")
             except ValueError:
-                print("    Geçersiz giriş, lütfen tam sayı yazın.")
+                print("    Invalid input, please enter an integer.")
 
-    print(f"\n[i] Başlatılıyor: {num_cores} çekirdek aktif ediliyor...")
+    print(f"\n[i] Launching: Activating {num_cores} cores...")
     sys.stdout.flush()
     write_worker_script()
 
@@ -839,7 +832,7 @@ if __name__ == "__main__":
     problem = WingOptimization(runner=runner, wake_iterations=wake_iterations)
 
     if ckpt_exists:
-        print("\n[i] Önceki optimizasyon durumu yüklendi!")
+        print("\n[i] Restored previous optimization state!")
         with open(ckpt_file, "rb") as f:
             algorithm = pickle.load(f)
         algorithm.display = WingDisplay()
@@ -851,10 +844,10 @@ if __name__ == "__main__":
         problem.elementwise_runner = runner
         if hasattr(algorithm, "problem"):
             algorithm.problem = problem
-        print(f"[i] {current_gen}. nesilden devam → hedef: {target_gen}. nesil ({extra} nesil daha)")
+        print(f"[i] Resuming from gen {current_gen} → Target: gen {target_gen} ({extra} more)")
         sys.stdout.flush()
     else:
-        print("\n[i] Yeni optimizasyon başlatılıyor...")
+        print("\n[i] Starting new optimization...")
         algorithm = NSGA2(
             pop_size=pop_size,
             n_offsprings=pop_size,
@@ -864,13 +857,13 @@ if __name__ == "__main__":
             eliminate_duplicates=True,
         )
         target_gen = extra
-        print(f"[i] Popülasyon boyutu: {pop_size} | Hedef: {target_gen} nesil")
+        print(f"[i] Pop size: {pop_size} | Target: {target_gen} generations")
         sys.stdout.flush()
 
     rnd_seed = random.randint(1, 10000)
     res = None
 
-    # Checkpoint'ten yüklenen eski görsel ayarları ezerek yeni gelişmiş tabloyu zorluyoruz
+    # Enforce updated display layout structures
     algorithm.verbose = True
     algorithm.display = WingDisplay()
 
@@ -886,14 +879,13 @@ if __name__ == "__main__":
             save_history=True,
         )
         print("\n" + "=" * 70)
-        print("OPTİMİZASYON TAMAMLANDI!")
+        print("OPTIMIZATION COMPLETED SUCCESSFULLY!")
 
     except KeyboardInterrupt:
-        print("\n\n[!] Kullanıcı tarafından durduruldu.")
+        print("\n\n[!] Stopped by user.")
 
     finally:
-        # Pool'u temiz kapat — önce terminate, sonra join
+        # Terminate remaining workers safely
         pool.terminate()
         pool.join()
-        # Hem normal bitişte hem Ctrl+C'de kaydet
         save_results(algorithm, res)
