@@ -1,6 +1,7 @@
 # Python execution caches
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 *$py.class
 *.so
 
