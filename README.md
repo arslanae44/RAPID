@@ -18,7 +18,7 @@ An NSGA-II and NASA OpenVSP-based portable optimization tool designed for aircra
 
 ---
 
-## 🚀 Usage Instructions
+## 📖 Usage Instructions
 
 1. Run **`RUN_OPTIMIZATION.bat`**.
 2. Enter the number of CPU cores to allocate (Default: 32). The engine runs fully in parallel utilizing a dynamic worker pool.
@@ -83,7 +83,7 @@ Optimal solutions are dynamically named based on their geometric parameters:
 
 ---
 
-## 🔮 Future Roadmap
+##   Future Roadmap
 
 ### 1. Coupled Wing-Tail Design
 Simultaneously designing the wing and the tailplane. This will enable integrated, co-optimized planform sizing alongside trim and longitudinal static margin assessments.
