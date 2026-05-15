@@ -12,7 +12,8 @@ __pycache__/
 # Large portable binary bundles and local analytics
 system_files/python_runtime/
 system_files/OpenVSP-3.47.0-win64/
-wing_models/
+wing_models/*
+!wing_models/.gitkeep
 PLOTS/
 
 # Dynamic OpenVSP analytics outputs
