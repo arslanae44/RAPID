@@ -1,5 +1,5 @@
 # RAPID (Rapid Aircraft Planform Iterative Design Tool)
-**Developed by Ahmet Emre Arslan**
+**Developed by Ahmet Emre Arslan - Released under MIT License**
 
 An NSGA-II and NASA OpenVSP-based portable optimization tool designed for aircraft wing planform geometry synthesis. It features an embedded, fully portable Python 3.12 runtime and OpenVSP 3.47.0 engine, requiring zero system installations or setups. 
 
