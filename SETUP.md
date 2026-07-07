@@ -12,7 +12,8 @@ go. The manual steps below are the same thing, broken out.
 ---
 
 ## 1. Python + dependencies
-Install Python 3.12 (64-bit) and the required packages:
+Install **Python 3.13 or 3.11** (64-bit) - OpenVSP 3.47.0 win64 is only built for
+these two versions, and the `openvsp` module must match your interpreter. Then:
 
 ```
 pip install -r requirements.txt

@@ -1,24 +1,32 @@
 """
-Fetch the OpenVSP 3.47.0 win64 build into system_files/OpenVSP-3.47.0-win64/.
+Fetch OpenVSP 3.47.0 (win64) into system_files/OpenVSP-3.47.0-win64/.
 
-The binaries are not stored in the repository (they are large), so this helper
-downloads and extracts them. It tries the known GitHub release assets and falls
-back to printing manual instructions if the download cannot be completed.
+The Windows build is published per Python version (3.11 or 3.13), so this
+helper picks the archive matching the Python running it, downloads it from
+openvsp.org, extracts the solver binaries, and tries to install the matching
+openvsp Python module. If anything fails it prints manual instructions.
+
+Only OpenVSP 3.47.0 is used on purpose: the optimizer is written against that
+API and newer releases may behave differently.
 """
 
 import io
 import os
+import sys
 import zipfile
+import subprocess
 import urllib.request
 
 VERSION = "3.47.0"
-TARGET_NAME = f"OpenVSP-{VERSION}-win64"
+TARGET_NAME = "OpenVSP-3.47.0-win64"
+SUPPORTED_PY = ("3.13", "3.11")
+BASE_URL = "https://openvsp.org/download.php?file=zips/old/windows/OpenVSP-{v}-win64-Python{py}.zip"
+MANUAL_PAGE = "https://openvsp.org/download_old.php"
 
-CANDIDATE_URLS = [
-    f"https://github.com/OpenVSP/OpenVSP/releases/download/OpenVSP_{VERSION}/OpenVSP-{VERSION}-win64.zip",
-    f"https://github.com/OpenVSP/OpenVSP/releases/download/{VERSION}/OpenVSP-{VERSION}-win64.zip",
-]
-MANUAL_PAGE = "https://openvsp.org/download.php"
+
+def pick_py():
+    mm = "{}.{}".format(sys.version_info.major, sys.version_info.minor)
+    return mm if mm in SUPPORTED_PY else None
 
 
 def main():
@@ -26,60 +34,73 @@ def main():
     target_dir = os.path.join(base_dir, "system_files", TARGET_NAME)
 
     if os.path.exists(os.path.join(target_dir, "vsp.exe")):
-        print(f"[=] OpenVSP already present at {target_dir}")
+        print("[=] OpenVSP already present at " + target_dir)
         return
 
-    os.makedirs(os.path.dirname(target_dir), exist_ok=True)
-    tmp_extract = os.path.join(base_dir, "system_files", "_openvsp_tmp")
-
-    data = None
-    for url in CANDIDATE_URLS:
-        try:
-            print(f"[*] Downloading OpenVSP {VERSION} from:\n    {url}")
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = resp.read()
-            print("[+] Download complete.")
-            break
-        except Exception as e:
-            print(f"    [-] Failed: {e}")
-
-    if data is None:
-        print("\n[!] Automatic download failed. Install manually:")
-        print(f"    1. Download the OpenVSP {VERSION} win64 zip from {MANUAL_PAGE}")
-        print(f"    2. Extract it so that vsp.exe sits at:")
-        print(f"       {os.path.join(target_dir, 'vsp.exe')}")
+    mm = "{}.{}".format(sys.version_info.major, sys.version_info.minor)
+    py = pick_py()
+    if py is None:
+        print("[!] Your Python is {}. OpenVSP {} win64 is only built for {}.".format(
+            mm, VERSION, " and ".join(SUPPORTED_PY)))
+        print("    Install Python 3.13 (or 3.11) and re-run, or download manually from")
+        print("    " + MANUAL_PAGE)
         return
 
+    url = BASE_URL.format(v=VERSION, py=py)
+    print("[*] Downloading OpenVSP {} (Python {}) from:\n    {}".format(VERSION, py, url))
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = resp.read()
+        print("[+] Downloaded {} MB.".format(len(data) // (1024 * 1024)))
+    except Exception as e:
+        print("[-] Download failed: {}".format(e))
+        print("    Get it manually from {} (pick the Python {} win64 build)".format(MANUAL_PAGE, py))
+        print("    and extract so vsp.exe is at " + os.path.join(target_dir, "vsp.exe"))
+        return
+
+    tmp = os.path.join(base_dir, "system_files", "_openvsp_tmp")
     print("[*] Extracting...")
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        zf.extractall(tmp_extract)
+        zf.extractall(tmp)
 
-    # The archive may extract directly or into a nested folder; locate vsp.exe.
     src_root = None
-    for root, _dirs, files in os.walk(tmp_extract):
+    for root, _dirs, files in os.walk(tmp):
         if "vsp.exe" in files:
             src_root = root
             break
-
     if src_root is None:
         print("[!] vsp.exe not found in the archive; please extract manually.")
         return
 
-    if os.path.abspath(src_root) != os.path.abspath(target_dir):
-        os.replace(src_root, target_dir) if not os.path.exists(target_dir) else None
-        if not os.path.exists(os.path.join(target_dir, "vsp.exe")):
-            # fallback: move file-by-file
-            import shutil
-            os.makedirs(target_dir, exist_ok=True)
-            for item in os.listdir(src_root):
-                shutil.move(os.path.join(src_root, item), os.path.join(target_dir, item))
+    import shutil
+    os.makedirs(target_dir, exist_ok=True)
+    for item in os.listdir(src_root):
+        dst = os.path.join(target_dir, item)
+        if not os.path.exists(dst):
+            shutil.move(os.path.join(src_root, item), dst)
+    shutil.rmtree(tmp, ignore_errors=True)
+    print("[+] OpenVSP ready at " + target_dir)
 
-    print(f"[SUCCESS] OpenVSP ready at {target_dir}")
-    print("\n[i] The 'openvsp' Python module lives in the extracted 'python' folder.")
-    print("    If 'import openvsp' fails with your Python, install the bundled wheel")
-    print("    from OpenVSP-*/python/ (match your Python version) or use the Python")
-    print("    interpreter shipped inside the OpenVSP package.")
+    # Best-effort install of the bundled Python API (matches this Python build).
+    py_dir = os.path.join(target_dir, "python")
+    if os.path.isdir(py_dir):
+        for pkg in ("openvsp_config", "degen_geom", "openvsp"):
+            pkg_path = os.path.join(py_dir, pkg)
+            if os.path.isdir(pkg_path):
+                try:
+                    subprocess.run([sys.executable, "-m", "pip", "install", pkg_path], check=True)
+                except Exception as e:
+                    print("    [i] pip install {} skipped: {}".format(pkg, e))
+
+    try:
+        import openvsp  # noqa: F401
+        print("[SUCCESS] 'import openvsp' works.")
+    except Exception:
+        print("\n[i] OpenVSP binaries installed, but the Python module is not importable yet.")
+        print("    Install it from the bundled folder for your Python {}:".format(py))
+        print('        pip install "{}"'.format(os.path.join(py_dir, "openvsp")))
+        print("    (install openvsp_config and degen_geom from the same folder first if needed).")
 
 
 if __name__ == "__main__":
