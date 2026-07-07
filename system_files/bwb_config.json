@@ -1,0 +1,52 @@
+{
+  "flight": {
+    "V_KMH": 600.0,
+    "RHO": 0.7364,
+    "TEMP_K": 255.7,
+    "MU": 1.628e-05,
+    "S_REF": 210.0,
+    "AOA": 1.0,
+    "INCIDENCE": 3.0
+  },
+  "bounds": {
+    "AR": [
+      4.0,
+      8.0
+    ],
+    "kink_frac": [
+      0.15,
+      0.7
+    ],
+    "t_inner": [
+      0.35,
+      0.85
+    ],
+    "t_outer": [
+      0.2,
+      0.7
+    ],
+    "sweep_inner": [
+      15.0,
+      35.0
+    ],
+    "sweep_outer": [
+      15.0,
+      40.0
+    ]
+  },
+  "constraints": {
+    "LD_MIN": 12.0,
+    "CM_MAX": 0.35,
+    "CL_MIN": 0.12
+  },
+  "bwb": {
+    "BWB_MODE": true,
+    "SM_MIN": 0.05,
+    "SM_MAX": 0.2,
+    "CM_TRIM_TOL": 0.03,
+    "ALPHA_DELTA": 2.0,
+    "CG_X": null,
+    "AIRFOIL_CATALOG": "Reflexed",
+    "BASELINE_AIRFOIL": "mh60"
+  }
+}

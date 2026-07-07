@@ -34,7 +34,43 @@ def load_pareto():
         return []
     with open(JSON_PATH, "r") as f:
         data = json.load(f)
-    return [d for d in data if 0 < d["LD"] < 60 and d["CL"] > 0]
+    pareto = [d for d in data if 0 < d["LD"] < 60 and d["CL"] > 0]
+    
+    # Auto-inject unique folder hashes retroactively by scanning output directories
+    try:
+        folder_cache = []
+        param_files = glob.glob(os.path.join(OUTPUT_DIR, "*", "params.json"))
+        for pf in param_files:
+            try:
+                with open(pf, "r") as f:
+                    pd = json.load(f)
+                if "x" in pd and "name" in pd:
+                    folder_cache.append({
+                        "x": np.array(pd["x"]),
+                        "name": pd["name"]
+                    })
+            except Exception:
+                pass
+        
+        for d in pareto:
+            if "hash" not in d or not d["hash"]:
+                x_target = np.array([d["AR"], d["kink_frac"], d["t_inner"], d["t_outer"], d["sweep_inner"], d["sweep_outer"]])
+                best_match = ""
+                min_dist = 1e9
+                for fc in folder_cache:
+                    dist = np.linalg.norm(x_target - fc["x"])
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_match = fc["name"]
+                if min_dist < 1e-2 and best_match:
+                    parts = best_match.split("_")
+                    d["hash"] = parts[-1] if len(parts) > 1 else ""
+                else:
+                    d["hash"] = ""
+    except Exception as e:
+        print(f"[i] Retroactive hash lookup disabled: {e}")
+        
+    return pareto
 
 def load_all_history():
     """Extracts all historical design points from output directories."""
@@ -252,9 +288,10 @@ def plot_dashboard(pareto, all_pop):
                 bbox=dict(facecolor="#fdfdfd", alpha=0.95, edgecolor="lightgray", boxstyle="round,pad=0.4"))
         info_text_objects.append((t_box, pretty_name))
 
+        title_hash = f" ({d.get('hash', '')})" if d.get("hash") else ""
         ax.set_title(
-            f"#{d['solution_id']}  CL={d['CL']:.4f}  L/D={d['LD']:.2f}",
-            fontsize=10, fontweight="bold", color="black", pad=4
+            f"#{d['solution_id']}{title_hash}  CL={d['CL']:.4f}  L/D={d['LD']:.2f}",
+            fontsize=9, fontweight="bold", color="black", pad=4
         )
 
     # ─── INTERACTIVE HOVER DYNAMICS ───────────────────────────────────────────

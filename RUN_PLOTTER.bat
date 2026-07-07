@@ -9,9 +9,10 @@ echo             RAPID PARETO VISUALIZATION MODULE
 echo ======================================================================
 echo.
 
-".\system_files\python_runtime\python.exe" ".\system_files\plotter.py"
+set "PYEXE=%SCRIPT_DIR%system_files\python_runtime\python.exe"
+if not exist "%PYEXE%" set "PYEXE=python"
+"%PYEXE%" ".\system_files\plotter.py"
 
 echo.
-echo Visualization completed successfully.
-echo Press any key to close...
+echo Done. Press any key to close...
 pause > nul

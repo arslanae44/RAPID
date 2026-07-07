@@ -10,15 +10,24 @@ __pycache__/
 .idea/
 .DS_Store
 
-# Large portable binary bundles and local analytics
+# ── Portable binaries (NOT committed — see SETUP.md to install locally) ──
+system_files/python_runtime/
+system_files/OpenVSP-3.47.0-win64/
+system_files/xfoil/
+
+# Old / experimental builds kept locally, not part of the release
+RANDOMFILES/
+
+# Run outputs and checkpoints
 wing_models/*
 !wing_models/.gitkeep
 PLOTS/*
 !PLOTS/.gitkeep
 
-# Dynamic OpenVSP analytics outputs
+# Dynamic OpenVSP / VSPAERO analysis artifacts
 *.adb
 *.pol
+*.polar
 *.fem
 *.txt
 *.csv
@@ -29,16 +38,36 @@ PLOTS/*
 *.des
 *.vspgeom
 *.vkey
+*.group.*
 *.quad.cases
 *.quad.1.dat
+*.case.*.dat
 *.lod
 *.slc
 *.cuts
 *.csf
 *.cases
 
-# Whitelist baseline reference files required to run
+# Baseline reference model required to run (whitelisted)
 *.vsp3
 *.vspaero
 !system_files/altc130mod.vsp3
 !system_files/altc130mod.vspaero
+
+# Full UIUC airfoil set is regenerable via system_files/download_airfoils.py.
+# Curated Low_Re / Medium_Re / High_Re / Reflexed catalogs stay tracked.
+airfoil_database/UIUC_All/
+
+# XFOIL run workspaces and runtime-generated co-optimized profiles
+system_files/xfoil_runs/
+system_files/active_airfoils/*
+!system_files/active_airfoils/.gitkeep
+
+# Dev scratch (untrack via SETUP.md maintainer step)
+system_files/test_debug.py
+
+# Keep dependency manifest despite the broad *.txt ignore
+!requirements.txt
+
+# Per-user active config (defaults live in rapid_config.py); BWB preset stays tracked
+system_files/rapid_config.json

@@ -57,6 +57,10 @@ V_MS      = p["V_MS"]
 RHO       = p["RHO"]
 MU        = p["MU"]
 WAKE_ITERATIONS = p.get("WAKE_ITERATIONS", 0)
+ACTIVE_AIRFOILS = p.get("ACTIVE_AIRFOILS", {"root": AIRFOIL, "kink": AIRFOIL, "tip": AIRFOIL})
+BWB_MODE    = p.get("BWB_MODE", False)
+ALPHA_DELTA = p.get("ALPHA_DELTA", 2.0)
+CG_X        = p.get("CG_X", None)
 
 AR, kink_frac, t_inner, t_outer, sw_in, sw_out = x
 c_root, c_kink, c_tip, b_half, b_kink, _mac = geo
@@ -69,15 +73,27 @@ def sp(wid, xsec_idx, parm, value):
     if pid != "":
         vsp.SetParmVal(pid, value)
 
-def set_airfoil(wid, xsec_idx, naca_code):
+def set_airfoil(wid, xsec_idx, airfoil_def):
     xsec_surf = vsp.GetXSecSurf(wid, 0)
-    vsp.ChangeXSecShape(xsec_surf, xsec_idx, vsp.XS_FOUR_SERIES)
+    
+    # Dynamic airfoil selector: Checks if reference points to existing file or fallback to NACA 4-digit
+    if isinstance(airfoil_def, str) and airfoil_def.lower().endswith(".dat") and os.path.exists(airfoil_def):
+        vsp.ChangeXSecShape(xsec_surf, xsec_idx, vsp.XS_FILE_AIRFOIL)
+        vsp.Update()
+        xsec = vsp.GetXSec(xsec_surf, xsec_idx)
+        vsp.ReadFileAirfoil(xsec, airfoil_def)
+    else:
+        vsp.ChangeXSecShape(xsec_surf, xsec_idx, vsp.XS_FOUR_SERIES)
+        vsp.Update()
+        xsec = vsp.GetXSec(xsec_surf, xsec_idx)
+        code = str(airfoil_def).lower().replace("naca", "")
+        # Fall back to the baseline NACA if the reference is not a 4-digit code.
+        if not (code.isdigit() and len(code) >= 4):
+            code = "2412"
+        vsp.SetParmVal(vsp.GetXSecParm(xsec, "Camber"),     int(code[0]) / 100.0)
+        vsp.SetParmVal(vsp.GetXSecParm(xsec, "CamberLoc"),  int(code[1]) / 10.0)
+        vsp.SetParmVal(vsp.GetXSecParm(xsec, "ThickChord"), int(code[2:]) / 100.0)
     vsp.Update()
-    xsec = vsp.GetXSec(xsec_surf, xsec_idx)
-    code = naca_code.lower().replace("naca", "")
-    vsp.SetParmVal(vsp.GetXSecParm(xsec, "Camber"),     int(code[0]) / 100.0)
-    vsp.SetParmVal(vsp.GetXSecParm(xsec, "CamberLoc"),  int(code[1]) / 10.0)
-    vsp.SetParmVal(vsp.GetXSecParm(xsec, "ThickChord"), int(code[2:]) / 100.0)
 
 vsp.VSPCheckSetup()
 vsp.ClearVSPModel()
@@ -126,9 +142,9 @@ if pid_w != "": vsp.SetParmVal(pid_w, 40.0)
 pid_u = vsp.FindParm(wid, "Tess_U", "")
 if pid_u != "": vsp.SetParmVal(pid_u, 20.0)
 
-set_airfoil(wid, 0, AIRFOIL)
-set_airfoil(wid, 1, AIRFOIL)
-set_airfoil(wid, 2, AIRFOIL)
+set_airfoil(wid, 0, ACTIVE_AIRFOILS["root"])
+set_airfoil(wid, 1, ACTIVE_AIRFOILS["kink"])
+set_airfoil(wid, 2, ACTIVE_AIRFOILS["tip"])
 
 vsp.SetSetFlag(wid, 3, True)
 vsp.SetSetFlag(wid, 4, True)
@@ -146,57 +162,113 @@ vsp.SetAnalysisInputDefaults("VSPAEROComputeGeometry")
 vsp.SetIntAnalysisInput("VSPAEROComputeGeometry", "AnalysisMethod", [0])
 vsp.ExecAnalysis("VSPAEROComputeGeometry")
 
-vsp.SetAnalysisInputDefaults("VSPAEROSweep")
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "RefArea",  [S_REF])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "RefSpan",  [b_ref])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "RefChord", [mac])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "AnalysisMethod",   [0])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "WakeNumIter",      [WAKE_ITERATIONS])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "NumCPU",           [1])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "ParasiteDragFlag", [1])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "MachStart",  [MACH])
-vsp.SetIntAnalysisInput("VSPAEROSweep",   "MachNpts",    [1])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "AlphaStart", [AOA])
-vsp.SetIntAnalysisInput("VSPAEROSweep",   "AlphaNpts",   [1])
-
+# Read the generated vspaero file, and update/rewrite its lines with our custom parameters
+import subprocess
+vspaero_file = f"{name}.vspaero"
 Re_mac = RHO * V_MS * mac / MU
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "ReCref", [Re_mac])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "Rho",    [RHO])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "Vinf",   [V_MS])
 
-vsp.ExecAnalysis("VSPAEROSweep")
+for _ in range(20):
+    try:
+        with open(vspaero_file, "r") as f:
+            lines = f.readlines()
+        break
+    except Exception:
+        time.sleep(0.05 + random.random() * 0.1)
+
+new_lines = []
+for line in lines:
+    if "=" in line:
+        parts = line.split("=")
+        key = parts[0].strip()
+        if key == "Sref":
+            new_lines.append(f"Sref = {S_REF} \n")
+        elif key == "Cref":
+            new_lines.append(f"Cref = {mac} \n")
+        elif key == "Bref":
+            new_lines.append(f"Bref = {b_ref} \n")
+        elif key == "Mach":
+            new_lines.append(f"Mach = {MACH} \n")
+        elif key == "AoA":
+            if BWB_MODE:
+                new_lines.append(f"AoA = {AOA}, {AOA + ALPHA_DELTA} \n")
+            else:
+                new_lines.append(f"AoA = {AOA} \n")
+        elif key == "X_cg" and BWB_MODE:
+            _cg = (0.25 * mac) if CG_X is None else CG_X
+            new_lines.append(f"X_cg = {_cg} \n")
+        elif key == "ReCref":
+            new_lines.append(f"ReCref = {Re_mac} \n")
+        elif key == "Vinf":
+            new_lines.append(f"Vinf = {V_MS} \n")
+        elif key == "Rho":
+            new_lines.append(f"Rho = {RHO} \n")
+        elif key == "WakeIters":
+            new_lines.append(f"WakeIters = {WAKE_ITERATIONS} \n")
+        else:
+            new_lines.append(line)
+    else:
+        new_lines.append(line)
+
+for _ in range(20):
+    try:
+        with open(vspaero_file, "w") as f:
+            f.writelines(new_lines)
+        break
+    except Exception:
+        time.sleep(0.05 + random.random() * 0.1)
+
+# Run vspaero subprocess directly
+vspaero_path = os.path.join(VSP_ROOT, "vspaero.exe" if sys.platform.startswith("win") else "vspaero")
+subprocess.run(
+    [vspaero_path, "-omp", "1", name],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE
+)
 
 result = {"CL": None, "CD": None, "LD": None, "CM": None, "error": None}
 try:
-    all_res_names = vsp.GetAllResultsNames()
-    target = ""
-    for possible_name in ["VSPAERO_Polar", "VSPAERO_History"]:
-        if possible_name in all_res_names:
-            target = possible_name
-            break
-
-    if target == "":
-        result["error"] = "No result found"
+    polar_file = f"{name}.polar"
+    if not os.path.exists(polar_file):
+        result["error"] = f"Polar file {polar_file} not generated by VSPAERO"
     else:
-        res_id     = vsp.FindLatestResultsID(target)
-        data_names = vsp.GetAllDataNames(res_id)
+        for _ in range(20):
+            try:
+                with open(polar_file, "r") as f:
+                    p_lines = f.readlines()
+                break
+            except Exception:
+                time.sleep(0.05 + random.random() * 0.1)
+        
+        headers = p_lines[2].strip().split()
+        data_rows = []
+        for _ln in p_lines[3:]:
+            parts = _ln.strip().split()
+            if len(parts) == len(headers):
+                try:
+                    data_rows.append([float(v) for v in parts])
+                except ValueError:
+                    pass
+        if not data_rows:
+            raise ValueError("No numeric polar rows parsed")
 
-        # Trefftz Plane Wake integration (wtot) for stable drag values
-        cl = vsp.GetDoubleResults(res_id, "CLwtot")[-1] if "CLwtot" in data_names else \
-             (vsp.GetDoubleResults(res_id, "CLtot")[-1] if "CLtot"  in data_names else
-              (vsp.GetDoubleResults(res_id, "CL")[-1]    if "CL"     in data_names else 0.0))
-        cd = vsp.GetDoubleResults(res_id, "CDwtot")[-1] if "CDwtot" in data_names else \
-             (vsp.GetDoubleResults(res_id, "CDtot")[-1] if "CDtot"  in data_names else
-              (vsp.GetDoubleResults(res_id, "CD")[-1]    if "CD"     in data_names else 0.0))
+        def _row(vals):
+            d = dict(zip(headers, vals))
+            cl = d.get("CLwtot", d.get("CLtot", d.get("CL", 0.0)))
+            cd = d.get("CDwtot", d.get("CDtot", d.get("CD", 0.0)))
+            cm = d.get("CMytot", d.get("CMiy", d.get("CMoy", 0.0)))
+            return cl, cd, cm
 
-        if   "CMytot" in data_names: cm = vsp.GetDoubleResults(res_id, "CMytot")[-1]
-        elif "CMy"    in data_names: cm = vsp.GetDoubleResults(res_id, "CMy")[-1]
-        elif "CMm"    in data_names: cm = vsp.GetDoubleResults(res_id, "CMm")[-1]
-        else: cm = 0.0
-
+        cl, cd, cm = _row(data_rows[0])
         ld = cl / cd if cd != 0 else 0
         result.update({"CL": cl, "CD": cd, "LD": ld, "CM": cm})
 
+        if BWB_MODE and len(data_rows) >= 2:
+            cl2, cd2, cm2 = _row(data_rows[1])
+            dCL = cl2 - cl
+            dCmdCL = (cm2 - cm) / dCL if abs(dCL) > 1e-6 else 0.0
+            result["dCmdCL"] = dCmdCL
+            result["SM"] = -dCmdCL          # static margin (fraction of MAC, about X_cg)
+            result["CM_trim"] = cm          # pitching moment at design alpha
 except Exception as e:
     result["error"] = str(e)
 

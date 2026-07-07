@@ -13,6 +13,7 @@ except Exception:
 
 # Dynamically locate local OpenVSP Root in the portable distribution
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)  # Ensures seamless import of sister modules like xfoil_handler.py
 VSP_ROOT = os.path.join(SCRIPT_DIR, "OpenVSP-3.47.0-win64")
 if os.path.exists(VSP_ROOT):
     try:
@@ -38,6 +39,10 @@ from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
 from pymoo.core.callback import Callback
 from pymoo.util.display.display import Display
+
+# Aerodynamic custom modules
+from xfoil_handler import analyze_airfoil
+
 from pymoo.util.display.column import Column
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -81,7 +86,66 @@ LD_MIN = 15.0
 CM_MAX = 0.35
 CL_MIN = 0.15
 
+# ─── EXTERNAL CONFIG OVERRIDES (constraints / bounds / flight / BWB) ──────────
+# Overridden by rapid_config.json or the RAPID_CONFIG_FILE env var (see rapid_config.py).
+BWB_MODE = False
+SM_MIN, SM_MAX, CM_TRIM_TOL, ALPHA_DELTA, CG_X = 0.05, 0.20, 0.02, 2.0, None
+AIRFOIL_CATALOG = "Medium_Re"
+BASELINE_AIRFOIL = "mh60"
+try:
+    from rapid_config import load_effective_config
+    _cfg = load_effective_config()
+    _fl, _bd, _co, _bw = _cfg["flight"], _cfg["bounds"], _cfg["constraints"], _cfg["bwb"]
+    V_MS  = float(_fl["V_KMH"]) / 3.6
+    RHO   = float(_fl["RHO"]); TEMP_K = float(_fl["TEMP_K"]); MU = float(_fl["MU"])
+    MACH  = V_MS / np.sqrt(1.4 * 287.05 * TEMP_K)
+    S_REF = float(_fl["S_REF"]); AOA = float(_fl["AOA"]); INCIDENCE = float(_fl["INCIDENCE"])
+    BOUNDS = [tuple(_bd[k]) for k in ("AR", "kink_frac", "t_inner", "t_outer", "sweep_inner", "sweep_outer")]
+    LD_MIN = float(_co["LD_MIN"]); CM_MAX = float(_co["CM_MAX"]); CL_MIN = float(_co["CL_MIN"])
+    BWB_MODE = bool(_bw["BWB_MODE"])
+    SM_MIN = float(_bw["SM_MIN"]); SM_MAX = float(_bw["SM_MAX"])
+    CM_TRIM_TOL = float(_bw["CM_TRIM_TOL"]); ALPHA_DELTA = float(_bw["ALPHA_DELTA"])
+    _cgx = _bw.get("CG_X", None)
+    CG_X = None if _cgx in (None, "", "none", "None") else float(_cgx)
+    AIRFOIL_CATALOG = str(_bw.get("AIRFOIL_CATALOG", "Medium_Re"))
+    BASELINE_AIRFOIL = str(_bw.get("BASELINE_AIRFOIL", "mh60") or "")
+    print(f"[cfg] BWB_MODE={BWB_MODE} | L/D>={LD_MIN} CM<={CM_MAX} CL>={CL_MIN} | S_REF={S_REF} V={V_MS*3.6:.0f}km/h")
+except Exception as _e:
+    print(f"[cfg] Using built-in defaults (config load skipped: {_e})")
+
+N_CONSTR = 5 if BWB_MODE else 3
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ─── AIRFOIL CO-OPTIMIZATION FEEDBACK ────────────────────────────────────────
+# Dictionary holding active profile assignments for Root, Kink, and Tip stations.
+# Defaults to global AIRFOIL variable (e.g., naca2412) unless a back-feed JSON exists.
+ACTIVE_AIRFOILS_CONFIG = os.path.join(SCRIPT_DIR, "active_airfoils.json")
+ACTIVE_AIRFOILS = {
+    "root": AIRFOIL,
+    "kink": AIRFOIL,
+    "tip":  AIRFOIL
+}
+if os.path.exists(ACTIVE_AIRFOILS_CONFIG):
+    try:
+        with open(ACTIVE_AIRFOILS_CONFIG, "r", encoding="utf-8") as f:
+            loaded_cfg = json.load(f)
+            if isinstance(loaded_cfg, dict):
+                ACTIVE_AIRFOILS.update(loaded_cfg)
+    except Exception:
+        pass
+
+# BWB: seed stations with a reflexed section so the first pass is trimmable.
+if BWB_MODE:
+    _still_baseline = all(not str(v).lower().endswith(".dat") for v in ACTIVE_AIRFOILS.values())
+    if _still_baseline and BASELINE_AIRFOIL:
+        _bn = BASELINE_AIRFOIL if BASELINE_AIRFOIL.lower().endswith(".dat") else BASELINE_AIRFOIL + ".dat"
+        _bp = os.path.join(WORK_DIR, "airfoil_database", "Reflexed", _bn)
+        if os.path.exists(_bp):
+            ACTIVE_AIRFOILS = {"root": _bp, "kink": _bp, "tip": _bp}
+            print(f"[cfg] BWB baseline reflexed section: {_bn}")
+        else:
+            print(f"[cfg] BWB baseline reflexed '{_bn}' not found in airfoil_database/Reflexed; using {AIRFOIL}")
 
 # ─── YARDIMCI FONKSİYONLAR ───────────────────────────────────────────────────
 def half_span_from_ar(AR):
@@ -137,6 +201,20 @@ def save_results(algorithm, res=None):
             print("[!] No Pareto solutions found to save.")
             return
 
+        import glob
+        folder_cache = []
+        for p_file in glob.glob(os.path.join(OUTPUT_DIR, "*", "params.json")):
+            try:
+                with open(p_file, "r") as f:
+                    pd = json.load(f)
+                if "x" in pd and "name" in pd:
+                    folder_cache.append({
+                        "x": np.array(pd["x"]),
+                        "name": pd["name"]
+                    })
+            except Exception:
+                pass
+
         final_results = []
         sol_counter = 1
         for i, (f, x) in enumerate(zip(F, X)):
@@ -149,6 +227,21 @@ def save_results(algorithm, res=None):
                 if cv > 1e-6:
                     continue
 
+            matching_name = ""
+            matching_hash = ""
+            best_dist = 1e9
+            for item in folder_cache:
+                dist = np.linalg.norm(x - item["x"])
+                if dist < best_dist:
+                    best_dist = dist
+                    matching_name = item["name"]
+            
+            if best_dist < 1e-2 and matching_name:
+                parts = matching_name.split("_")
+                matching_hash = parts[-1] if len(parts) > 1 else ""
+            else:
+                matching_name = ""
+
             final_results.append({
                 "solution_id": sol_counter,
                 "CL":          round(-f[0], 5),
@@ -159,6 +252,8 @@ def save_results(algorithm, res=None):
                 "t_outer":     round(x[3], 3),
                 "sweep_inner": round(x[4], 2),
                 "sweep_outer": round(x[5], 2),
+                "folder_name": matching_name,
+                "hash":        matching_hash,
             })
             sol_counter += 1
 
@@ -241,6 +336,10 @@ V_MS      = p["V_MS"]
 RHO       = p["RHO"]
 MU        = p["MU"]
 WAKE_ITERATIONS = p.get("WAKE_ITERATIONS", 0)
+ACTIVE_AIRFOILS = p.get("ACTIVE_AIRFOILS", {"root": AIRFOIL, "kink": AIRFOIL, "tip": AIRFOIL})
+BWB_MODE    = p.get("BWB_MODE", False)
+ALPHA_DELTA = p.get("ALPHA_DELTA", 2.0)
+CG_X        = p.get("CG_X", None)
 
 AR, kink_frac, t_inner, t_outer, sw_in, sw_out = x
 c_root, c_kink, c_tip, b_half, b_kink, _mac = geo
@@ -253,15 +352,27 @@ def sp(wid, xsec_idx, parm, value):
     if pid != "":
         vsp.SetParmVal(pid, value)
 
-def set_airfoil(wid, xsec_idx, naca_code):
+def set_airfoil(wid, xsec_idx, airfoil_def):
     xsec_surf = vsp.GetXSecSurf(wid, 0)
-    vsp.ChangeXSecShape(xsec_surf, xsec_idx, vsp.XS_FOUR_SERIES)
+    
+    # Dynamic airfoil selector: Checks if reference points to existing file or fallback to NACA 4-digit
+    if isinstance(airfoil_def, str) and airfoil_def.lower().endswith(".dat") and os.path.exists(airfoil_def):
+        vsp.ChangeXSecShape(xsec_surf, xsec_idx, vsp.XS_FILE_AIRFOIL)
+        vsp.Update()
+        xsec = vsp.GetXSec(xsec_surf, xsec_idx)
+        vsp.ReadFileAirfoil(xsec, airfoil_def)
+    else:
+        vsp.ChangeXSecShape(xsec_surf, xsec_idx, vsp.XS_FOUR_SERIES)
+        vsp.Update()
+        xsec = vsp.GetXSec(xsec_surf, xsec_idx)
+        code = str(airfoil_def).lower().replace("naca", "")
+        # Fall back to the baseline NACA if the reference is not a 4-digit code.
+        if not (code.isdigit() and len(code) >= 4):
+            code = "2412"
+        vsp.SetParmVal(vsp.GetXSecParm(xsec, "Camber"),     int(code[0]) / 100.0)
+        vsp.SetParmVal(vsp.GetXSecParm(xsec, "CamberLoc"),  int(code[1]) / 10.0)
+        vsp.SetParmVal(vsp.GetXSecParm(xsec, "ThickChord"), int(code[2:]) / 100.0)
     vsp.Update()
-    xsec = vsp.GetXSec(xsec_surf, xsec_idx)
-    code = naca_code.lower().replace("naca", "")
-    vsp.SetParmVal(vsp.GetXSecParm(xsec, "Camber"),     int(code[0]) / 100.0)
-    vsp.SetParmVal(vsp.GetXSecParm(xsec, "CamberLoc"),  int(code[1]) / 10.0)
-    vsp.SetParmVal(vsp.GetXSecParm(xsec, "ThickChord"), int(code[2:]) / 100.0)
 
 vsp.VSPCheckSetup()
 vsp.ClearVSPModel()
@@ -310,9 +421,9 @@ if pid_w != "": vsp.SetParmVal(pid_w, 40.0)
 pid_u = vsp.FindParm(wid, "Tess_U", "")
 if pid_u != "": vsp.SetParmVal(pid_u, 20.0)
 
-set_airfoil(wid, 0, AIRFOIL)
-set_airfoil(wid, 1, AIRFOIL)
-set_airfoil(wid, 2, AIRFOIL)
+set_airfoil(wid, 0, ACTIVE_AIRFOILS["root"])
+set_airfoil(wid, 1, ACTIVE_AIRFOILS["kink"])
+set_airfoil(wid, 2, ACTIVE_AIRFOILS["tip"])
 
 vsp.SetSetFlag(wid, 3, True)
 vsp.SetSetFlag(wid, 4, True)
@@ -330,57 +441,113 @@ vsp.SetAnalysisInputDefaults("VSPAEROComputeGeometry")
 vsp.SetIntAnalysisInput("VSPAEROComputeGeometry", "AnalysisMethod", [0])
 vsp.ExecAnalysis("VSPAEROComputeGeometry")
 
-vsp.SetAnalysisInputDefaults("VSPAEROSweep")
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "RefArea",  [S_REF])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "RefSpan",  [b_ref])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "RefChord", [mac])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "AnalysisMethod",   [0])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "WakeNumIter",      [WAKE_ITERATIONS])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "NumCPU",           [1])
-vsp.SetIntAnalysisInput("VSPAEROSweep", "ParasiteDragFlag", [1])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "MachStart",  [MACH])
-vsp.SetIntAnalysisInput("VSPAEROSweep",   "MachNpts",    [1])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "AlphaStart", [AOA])
-vsp.SetIntAnalysisInput("VSPAEROSweep",   "AlphaNpts",   [1])
-
+# Read the generated vspaero file, and update/rewrite its lines with our custom parameters
+import subprocess
+vspaero_file = f"{name}.vspaero"
 Re_mac = RHO * V_MS * mac / MU
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "ReCref", [Re_mac])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "Rho",    [RHO])
-vsp.SetDoubleAnalysisInput("VSPAEROSweep", "Vinf",   [V_MS])
 
-vsp.ExecAnalysis("VSPAEROSweep")
+for _ in range(20):
+    try:
+        with open(vspaero_file, "r") as f:
+            lines = f.readlines()
+        break
+    except Exception:
+        time.sleep(0.05 + random.random() * 0.1)
+
+new_lines = []
+for line in lines:
+    if "=" in line:
+        parts = line.split("=")
+        key = parts[0].strip()
+        if key == "Sref":
+            new_lines.append(f"Sref = {S_REF} \n")
+        elif key == "Cref":
+            new_lines.append(f"Cref = {mac} \n")
+        elif key == "Bref":
+            new_lines.append(f"Bref = {b_ref} \n")
+        elif key == "Mach":
+            new_lines.append(f"Mach = {MACH} \n")
+        elif key == "AoA":
+            if BWB_MODE:
+                new_lines.append(f"AoA = {AOA}, {AOA + ALPHA_DELTA} \n")
+            else:
+                new_lines.append(f"AoA = {AOA} \n")
+        elif key == "X_cg" and BWB_MODE:
+            _cg = (0.25 * mac) if CG_X is None else CG_X
+            new_lines.append(f"X_cg = {_cg} \n")
+        elif key == "ReCref":
+            new_lines.append(f"ReCref = {Re_mac} \n")
+        elif key == "Vinf":
+            new_lines.append(f"Vinf = {V_MS} \n")
+        elif key == "Rho":
+            new_lines.append(f"Rho = {RHO} \n")
+        elif key == "WakeIters":
+            new_lines.append(f"WakeIters = {WAKE_ITERATIONS} \n")
+        else:
+            new_lines.append(line)
+    else:
+        new_lines.append(line)
+
+for _ in range(20):
+    try:
+        with open(vspaero_file, "w") as f:
+            f.writelines(new_lines)
+        break
+    except Exception:
+        time.sleep(0.05 + random.random() * 0.1)
+
+# Run vspaero subprocess directly
+vspaero_path = os.path.join(VSP_ROOT, "vspaero.exe" if sys.platform.startswith("win") else "vspaero")
+subprocess.run(
+    [vspaero_path, "-omp", "1", name],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE
+)
 
 result = {"CL": None, "CD": None, "LD": None, "CM": None, "error": None}
 try:
-    all_res_names = vsp.GetAllResultsNames()
-    target = ""
-    for possible_name in ["VSPAERO_Polar", "VSPAERO_History"]:
-        if possible_name in all_res_names:
-            target = possible_name
-            break
-
-    if target == "":
-        result["error"] = "No result found"
+    polar_file = f"{name}.polar"
+    if not os.path.exists(polar_file):
+        result["error"] = f"Polar file {polar_file} not generated by VSPAERO"
     else:
-        res_id     = vsp.FindLatestResultsID(target)
-        data_names = vsp.GetAllDataNames(res_id)
+        for _ in range(20):
+            try:
+                with open(polar_file, "r") as f:
+                    p_lines = f.readlines()
+                break
+            except Exception:
+                time.sleep(0.05 + random.random() * 0.1)
+        
+        headers = p_lines[2].strip().split()
+        data_rows = []
+        for _ln in p_lines[3:]:
+            parts = _ln.strip().split()
+            if len(parts) == len(headers):
+                try:
+                    data_rows.append([float(v) for v in parts])
+                except ValueError:
+                    pass
+        if not data_rows:
+            raise ValueError("No numeric polar rows parsed")
 
-        # Trefftz Plane Wake integration (wtot) for stable drag values
-        cl = vsp.GetDoubleResults(res_id, "CLwtot")[-1] if "CLwtot" in data_names else \
-             (vsp.GetDoubleResults(res_id, "CLtot")[-1] if "CLtot"  in data_names else
-              (vsp.GetDoubleResults(res_id, "CL")[-1]    if "CL"     in data_names else 0.0))
-        cd = vsp.GetDoubleResults(res_id, "CDwtot")[-1] if "CDwtot" in data_names else \
-             (vsp.GetDoubleResults(res_id, "CDtot")[-1] if "CDtot"  in data_names else
-              (vsp.GetDoubleResults(res_id, "CD")[-1]    if "CD"     in data_names else 0.0))
+        def _row(vals):
+            d = dict(zip(headers, vals))
+            cl = d.get("CLwtot", d.get("CLtot", d.get("CL", 0.0)))
+            cd = d.get("CDwtot", d.get("CDtot", d.get("CD", 0.0)))
+            cm = d.get("CMytot", d.get("CMiy", d.get("CMoy", 0.0)))
+            return cl, cd, cm
 
-        if   "CMytot" in data_names: cm = vsp.GetDoubleResults(res_id, "CMytot")[-1]
-        elif "CMy"    in data_names: cm = vsp.GetDoubleResults(res_id, "CMy")[-1]
-        elif "CMm"    in data_names: cm = vsp.GetDoubleResults(res_id, "CMm")[-1]
-        else: cm = 0.0
-
+        cl, cd, cm = _row(data_rows[0])
         ld = cl / cd if cd != 0 else 0
         result.update({"CL": cl, "CD": cd, "LD": ld, "CM": cm})
 
+        if BWB_MODE and len(data_rows) >= 2:
+            cl2, cd2, cm2 = _row(data_rows[1])
+            dCL = cl2 - cl
+            dCmdCL = (cm2 - cm) / dCL if abs(dCL) > 1e-6 else 0.0
+            result["dCmdCL"] = dCmdCL
+            result["SM"] = -dCmdCL          # static margin (fraction of MAC, about X_cg)
+            result["CM_trim"] = cm          # pitching moment at design alpha
 except Exception as e:
     result["error"] = str(e)
 
@@ -413,7 +580,7 @@ def evaluate_subprocess(x, wake_iterations=4):
     # Apply randomized fallback penalties for failed geometries
     def get_penalty():
         p = 999.0 + random.uniform(0.01, 5.0)
-        return {"F": [p, p], "G": [p, p, p]}
+        return {"F": [p, p], "G": [p] * N_CONSTR}
 
     AR, kink_frac, t_inner, t_outer, sw_in, sw_out = x
     geo = chord_from_geometry(AR, kink_frac, t_inner, t_outer)
@@ -424,8 +591,9 @@ def evaluate_subprocess(x, wake_iterations=4):
     b_ref = 2.0 * b_half
 
     # ─── GEOMETRIC LABEL GENERATION ───────────────────────────────────────────
+    b_theoretical = 2.0 * half_span_from_ar(AR)
     ar_val     = int(round(AR * 10))
-    span_val   = int(round(b_ref))
+    span_val   = int(round(b_theoretical))
     kink_val   = int(round(kink_frac * 10))
     sw_in_val  = int(round(sw_in))
     sw_out_val = int(round(sw_out))
@@ -470,6 +638,9 @@ def evaluate_subprocess(x, wake_iterations=4):
         "S_REF": S_REF, "AOA": AOA, "INCIDENCE": INCIDENCE,
         "AIRFOIL": AIRFOIL, "MACH": MACH, "V_MS": V_MS,
         "RHO": RHO, "MU": MU, "WAKE_ITERATIONS": wake_iterations,
+        "ACTIVE_AIRFOILS": ACTIVE_AIRFOILS,
+        "BWB_MODE": BWB_MODE, "SM_MIN": SM_MIN, "SM_MAX": SM_MAX,
+        "CM_TRIM_TOL": CM_TRIM_TOL, "ALPHA_DELTA": ALPHA_DELTA, "CG_X": CG_X,
     }
     params_file = os.path.join(run_dir, "params.json")
     result_file = os.path.join(run_dir, "result.json")
@@ -552,9 +723,14 @@ def evaluate_subprocess(x, wake_iterations=4):
             time.sleep(0.05 + random.random() * 0.1)
             
     if res is None:
+        print(f"[{pretty_name}] REJECTED: Result file empty (VSPAERO crashed)")
+        sys.stdout.flush()
         return get_penalty()
 
     if res.get("error") or res["CL"] is None:
+        err_msg = res.get("error", "Unknown VSPAERO Error")
+        print(f"[{pretty_name}] REJECTED: {err_msg}")
+        sys.stdout.flush()
         return get_penalty()
 
     CL = res["CL"]
@@ -563,7 +739,9 @@ def evaluate_subprocess(x, wake_iterations=4):
     CM = abs(res["CM"])
 
     # Eliminate non-physical diverging configurations
-    if LD > 60.0 or LD <= 0.0 or CL <= 0.0 or CL > 0.7:
+    if LD > 60.0 or LD <= 0.0 or CL <= 0.0 or CL > 1.5:
+        print(f"[{pretty_name}] REJECTED: Unphysical (CL: {CL:.2f}, L/D: {LD:.2f})")
+        sys.stdout.flush()
         return get_penalty()
 
     print(f"[{pretty_name}] CL: {CL:.4f} | L/D: {LD:.2f}")
@@ -571,9 +749,21 @@ def evaluate_subprocess(x, wake_iterations=4):
 
     f1 = -CL
     f2 = -LD
-    g1 = LD_MIN - LD   # L/D >= 15
-    g2 = CM - CM_MAX   # CM <= 0.35
-    g3 = CL_MIN - CL   # CL >= 0.15
+    g1 = LD_MIN - LD   # L/D >= LD_MIN
+    g3 = CL_MIN - CL   # CL >= CL_MIN
+    if BWB_MODE:
+        # Tailless longitudinal stability + trim from a 2-point alpha slope.
+        SM      = res.get("SM")
+        CM_trim = res.get("CM_trim")
+        if SM is None or CM_trim is None:
+            return get_penalty()
+        g_sm_lo = SM_MIN - SM                  # SM >= SM_MIN (stable enough)
+        g_sm_hi = SM - SM_MAX                  # SM <= SM_MAX (not over-stable)
+        g_trim  = abs(CM_trim) - CM_TRIM_TOL   # trimmable near the design point
+        print(f"[{pretty_name}] SM: {SM*100:.1f}% | Cm_trim: {CM_trim:+.3f}")
+        sys.stdout.flush()
+        return {"F": [f1, f2], "G": [g1, g3, g_sm_lo, g_sm_hi, g_trim]}
+    g2 = CM - CM_MAX   # |CM| <= CM_MAX
     return {"F": [f1, f2], "G": [g1, g2, g3]}
 
 # ─── OPTİMİZASYON PROBLEMİ ───────────────────────────────────────────────────
@@ -585,7 +775,7 @@ class WingOptimization(ElementwiseProblem):
         kwargs = {}
         if runner is not None:
             kwargs["elementwise_runner"] = runner
-        super().__init__(n_var=6, n_obj=2, n_ieq_constr=3, xl=xl, xu=xu, **kwargs)
+        super().__init__(n_var=6, n_obj=2, n_ieq_constr=N_CONSTR, xl=xl, xu=xu, **kwargs)
 
     def _evaluate(self, x, out, *args, **kwargs):
         result = evaluate_subprocess(x, wake_iterations=self.wake_iterations)
@@ -728,6 +918,331 @@ class FlushCallback(Callback):
         save_results(algorithm)
         sys.stdout.flush()
 
+# ─── PARALLEL XFOIL CANDIDATE SWEEPER ────────────────────────────────────────
+def _parallel_xfoil_worker(args):
+    """Top-level picklable worker process function for dynamic pool mapping."""
+    from xfoil_handler import analyze_airfoil
+    airfoil_path, reynolds, mach, alphas = args
+    try:
+        res = analyze_airfoil(airfoil_path, reynolds, mach, alphas)
+        return (os.path.basename(airfoil_path), res)
+    except Exception:
+        return (os.path.basename(airfoil_path), {})
+
+def _get_airfoil_thickness(filepath):
+    """Calculates approximate max thickness (t/c) of an airfoil from coordinate file."""
+    try:
+        y_vals = []
+        with open(filepath, 'r') as f:
+            for line in f.readlines():
+                pts = line.split()
+                if len(pts) >= 2:
+                    try:
+                        y_vals.append(float(pts[1]))
+                    except ValueError:
+                        pass
+        if not y_vals: return 0.0
+        return max(y_vals) - min(y_vals)
+    except Exception:
+        return 0.0
+
+def sweep_candidates_for_sections(sections, catalog_dir, num_cores):
+    """Loops through extraction stations, runs multi-core sweeps of all catalog profiles,
+    filters pitching constraints, and yields top candidates by Aerodynamic Efficiency."""
+    print(f"\n[*] Accessing catalog: {os.path.basename(catalog_dir)}")
+    all_files = [os.path.join(catalog_dir, f) for f in os.listdir(catalog_dir) if f.lower().endswith(".dat")]
+    
+    if not all_files:
+        print(f"[!] No airfoil coordinate .dat files located in {catalog_dir}!")
+        return None
+        
+    print(f"[i] Preparing {len(all_files)} candidates across {num_cores} parallel cores...")
+    
+    final_selections = {}
+    
+    # Launch dynamic local pool
+    pool = multiprocessing.Pool(processes=num_cores)
+    
+    try:
+        for s in sections:
+            sec_id = s["id"]
+            zone   = s["zone"]
+            Re     = s["Re"]
+            alpha_center = s["alpha"]
+            
+            # Evaluate 3 neighboring angles centered at expected local incidence for robust matching
+            alphas_to_test = [float(round(alpha_center - 2.0, 2)), 
+                              float(round(alpha_center, 2)), 
+                              float(round(alpha_center + 2.0, 2))]
+            
+            print(f"\n[+] Sweeping Station #{sec_id} ({zone}) | Target Re: {Re:,} | Sweep Alphas: {alphas_to_test}")
+            
+            # Form payload with Thickness PRE-SCREENING (C-130 Hercules Baseline)
+            # C-130 Root: ~18% (NACA 64A318), Tip: ~12% (NACA 64A412)
+            # We enforce minimum structural thickness bounds based on the zone
+            if "ROOT" in zone.upper():
+                min_thick = 0.18  # At least 18% thick (Exact C-130 18%)
+            elif "TIP" in zone.upper():
+                min_thick = 0.12  # At least 12% thick (C-130 tip is 12%)
+            else:
+                min_thick = 0.16  # Kink/Outer at least 16% thick
+                
+            mach_val = 0.1
+            payload = []
+            screened_out = 0
+            
+            for f in all_files:
+                t = _get_airfoil_thickness(f)
+                if t >= min_thick:
+                    payload.append((f, Re, mach_val, alphas_to_test))
+                else:
+                    screened_out += 1
+            
+            print(f"    [i] Structural Screen: {screened_out} thin airfoils rejected. {len(payload)} robust candidates proceed.")
+            
+            t0 = time.time()
+            # Dispatch batch jobs across cores
+            results = pool.map(_parallel_xfoil_worker, payload)
+            t1 = time.time()
+            
+            print(f"    Analysis completed in {t1-t0:.2f} seconds.")
+            
+            # Collate performance metrics
+            candidates = []
+            for name, polar in results:
+                if not polar:
+                    continue
+                    
+                cls = [d["CL"] for d in polar.values()]
+                cms = [d["CM"] for d in polar.values()]
+                lds = [d["LD"] for d in polar.values()]
+                
+                # Fewer than two converged alphas means an unreliable / blown-up
+                # solve, so skip the section entirely.
+                if len(cls) < 2:
+                    continue
+                    
+                avg_ld = float(np.mean(lds))
+                avg_cm = float(np.mean(cms))
+                
+                # Check for physically unrealistic data (XFOIL anomalies)
+                # and DELETE the corrupted profile from the active database permanently!
+                is_corrupted = False
+                if Re > 10000000 and avg_ld > 200.0:
+                    is_corrupted = True
+                elif Re <= 10000000 and avg_ld > 100.0:
+                    is_corrupted = True
+                    
+                if is_corrupted:
+                    corrupted_path = os.path.join(catalog_dir, name)
+                    try:
+                        if os.path.exists(corrupted_path):
+                            os.remove(corrupted_path)
+                            print(f"    [!] Purged unphysical airfoil from database: {name} (Avg L/D: {avg_ld:.1f} at Re: {Re:,})")
+                    except Exception:
+                        pass
+                    continue
+                
+                # Pitching-moment envelope: BWB sections need near-zero/positive Cm to self-trim.
+                if BWB_MODE:
+                    if avg_cm < -0.03:
+                        continue
+                else:
+                    if avg_cm < -0.08:
+                        continue
+                    
+                candidates.append({
+                    "name": name,
+                    "avg_ld": avg_ld,
+                    "avg_cm": avg_cm,
+                    "polar": polar
+                })
+                
+            # Rank candidates. Conventional: pure L/D. BWB/tailless: reward high L/D
+            # but strongly prefer near-zero / slightly positive Cm (reflexed) for trim.
+            if BWB_MODE:
+                candidates.sort(key=lambda x: x["avg_ld"] - 200.0 * abs(x["avg_cm"] - 0.01), reverse=True)
+            else:
+                candidates.sort(key=lambda x: x["avg_ld"], reverse=True)
+            
+            if not candidates:
+                print(f"    [!] Zero feasible profiles converged for Station #{sec_id}.")
+                final_selections[sec_id] = None
+            else:
+                best = candidates[0]
+                print(f"    [✓] Station Winner: {best['name']} (Average L/D: {best['avg_ld']:.2f}, CM: {best['avg_cm']:.4f})")
+                final_selections[sec_id] = {
+                    "id": sec_id,
+                    "zone": zone,
+                    "winner": best["name"],
+                    "winner_ld": best["avg_ld"],
+                    "winner_cm": best["avg_cm"],
+                    "ranking": candidates[:5] # Store top 5 for UI representation
+                }
+                
+    finally:
+        pool.close()
+        pool.join()
+        
+    return final_selections
+
+# ─── GEOMETRIC REFINEMENT SUBSYSTEM ──────────────────────────────────────────
+def _parallel_geom_refine_worker(args):
+    """Top-level picklable worker for parallel geometry tweaks (TFAC scaling)."""
+    from xfoil_handler import analyze_airfoil
+    airfoil_path, reynolds, mach, alphas, geom_factors = args
+    try:
+        res = analyze_airfoil(airfoil_path, reynolds, mach, alphas, geom_factors=geom_factors)
+        return (geom_factors, res)
+    except Exception:
+        return (geom_factors, {})
+
+def optimize_airfoil_geometry(airfoil_path, Re, target_alpha, original_cm, num_cores):
+    """Sweeps variations of thickness and camber in parallel, keeping CM constant to maximize L/D."""
+    print(f"\n[*] Launching AUTONOMOUS SHAPE REFINEMENT for {os.path.basename(airfoil_path)}")
+    print(f"    Optimizing at Local Flow: Re={Re:,} | Alpha={target_alpha:.2f} | Target CM={original_cm:.4f}")
+    
+    # Construct 2D scaling search space for Thickness and Camber
+    t_factors = [0.90, 0.95, 1.00, 1.05, 1.10]
+    c_factors = [0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20]
+    
+    grid = []
+    for t in t_factors:
+        for c in c_factors:
+            grid.append((t, c))
+            
+    print(f"[i] Generating {len(grid)} variant geometries. Dispatched across {num_cores} cores...")
+    
+    pool = multiprocessing.Pool(processes=num_cores)
+    
+    try:
+        mach_val = 0.1
+        alphas_to_test = [round(target_alpha, 2)]
+        
+        # Formulate payloads
+        payload = [(airfoil_path, Re, mach_val, alphas_to_test, factors) for factors in grid]
+        
+        t0 = time.time()
+        sweep_results = pool.map(_parallel_geom_refine_worker, payload)
+        t1 = time.time()
+        print(f"    Refinement variations completed in {t1-t0:.2f} seconds.")
+        
+        candidates = []
+        target_k = round(target_alpha, 2)
+        
+        for (tf, cf), polar in sweep_results:
+            if not polar:
+                continue
+            
+            # Pull result for target angle
+            data = None
+            for alpha_key in polar.keys():
+                if abs(alpha_key - target_k) < 0.05:
+                    data = polar[alpha_key]
+                    break
+            
+            if not data:
+                continue
+                
+            ld = float(data["LD"])
+            cm = float(data["CM"])
+            
+            # STABILITY ENVELOPE CONSTRAINT: Keep CM constant!
+            # We ensure pitching variation does not drift beyond highly tight bounds (abs delta <= 0.0075)
+            if abs(cm - original_cm) > 0.0075:
+                continue
+                
+            candidates.append({
+                "factors": (tf, cf),
+                "ld": ld,
+                "cm": cm
+            })
+            
+        # Rank by Aerodynamic efficiency descending
+        candidates.sort(key=lambda x: x["ld"], reverse=True)
+        
+        if not candidates:
+            print("    [!] Optimization sweep returned zero feasible shapes matching stability constraint bounds.")
+            return None
+            
+        best = candidates[0]
+        baseline = None
+        for c in candidates:
+            if abs(c["factors"][0] - 1.0) < 1e-3 and abs(c["factors"][1] - 1.0) < 1e-3:
+                baseline = c
+                break
+                
+        base_ld = baseline["ld"] if baseline else best["ld"]
+        improvement = ((best["ld"] - base_ld) / base_ld * 100) if base_ld > 0 else 0.0
+        
+        print("\n" + "=" * 60)
+        print(" AIRFOIL GEOMETRIC REFINEMENT SUMMARY")
+        print("=" * 60)
+        print(f" Baseline Profile (x1.0):   L/D = {base_ld:.2f}")
+        print(f" Optimized Profile Variant:  L/D = {best['ld']:.2f}  (Thick x{best['factors'][0]:.2f}, Camber x{best['factors'][1]:.2f})")
+        print(f" Net Performance Shift:      +{improvement:.2f}% Efficiency Gain")
+        print(f" Final Pitching Moment CM:   {best['cm']:.4f} (Baseline: {original_cm:.4f})")
+        print("=" * 60)
+        print("=" * 60)
+        
+        return {"best": best, "baseline": baseline}
+        
+    finally:
+        pool.close()
+        pool.join()
+
+# ─── SECTIONAL EXTRACTION UTILITY ───────────────────────────────────────────
+def extract_sectional_properties(selected_wing, num_sections):
+    """Linearly slices the wing half-span and calculates local chord, twist,
+    local Reynolds number, and local geometric angle of attack for each station."""
+    AR          = selected_wing["AR"]
+    kink_frac   = selected_wing["kink_frac"]
+    t_inner     = selected_wing["t_inner"]
+    t_outer     = selected_wing["t_outer"]
+    
+    res = chord_from_geometry(AR, kink_frac, t_inner, t_outer)
+    if not res:
+        return None
+        
+    c_root, c_kink, c_tip, b_half, b_kink, mac = res
+    
+    # Distribute linearly from Root (y=0) to Tip (y=b_half)
+    y_stations = np.linspace(0.0, b_half, num_sections)
+    
+    sections = []
+    for i, y in enumerate(y_stations):
+        # Structural boundary assignment
+        if y <= b_kink:
+            frac = y / b_kink if b_kink > 0.0 else 0.0
+            c_loc = c_root + (c_kink - c_root) * frac
+            twist_loc = 0.0
+            zone = "ROOT" if i == 0 else "INNER"
+        else:
+            frac = (y - b_kink) / (b_half - b_kink) if (b_half - b_kink) > 0.0 else 0.0
+            c_loc = c_kink + (c_tip - c_kink) * frac
+            twist_loc = -INCIDENCE * frac
+            zone = "TIP" if i == num_sections - 1 else "OUTER"
+            
+        # Flow math: Re_local = (rho * V * c) / mu
+        Re_loc = RHO * V_MS * c_loc / MU
+        alpha_loc = AOA + INCIDENCE + twist_loc
+        
+        sections.append({
+            "id": i + 1,
+            "y_loc": y,
+            "chord": c_loc,
+            "twist": twist_loc,
+            "alpha": alpha_loc,
+            "Re": int(round(Re_loc)),
+            "zone": zone
+        })
+        
+    return {
+        "sections": sections,
+        "c_root": c_root, "c_kink": c_kink, "c_tip": c_tip,
+        "b_half": b_half, "b_kink": b_kink, "mac": mac
+    }
+
 # ─── MAIN LAUNCHER ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import openvsp as vsp
@@ -736,6 +1251,21 @@ if __name__ == "__main__":
     print("=" * 70)
     print(f"Constraints: L/D >= {LD_MIN} | CM <= {CM_MAX} | CL >= {CL_MIN}")
     print("=" * 70)
+
+    # ─── CO-OPTIMIZATION STATUS MONITOR ─────────────────────────────────────────
+    # Instantly report to the user if customized persistence shapes are being enforced!
+    print("\n" + "-" * 70)
+    is_custom = any([isinstance(v, str) and v.lower().endswith(".dat") for v in ACTIVE_AIRFOILS.values()])
+    if is_custom:
+        print("[✓] CO-OPTIMIZATION ACTIVE: Enforcing Custom Multi-Sectional Profiles!")
+        print("    - Root Cross-Section: " + os.path.basename(ACTIVE_AIRFOILS["root"]))
+        print("    - Kink Cross-Section: " + os.path.basename(ACTIVE_AIRFOILS["kink"]))
+        print("    - Tip Cross-Section:  " + os.path.basename(ACTIVE_AIRFOILS["tip"]))
+        print("    (Every wing generated in this optimization session will utilize these customized shapes)")
+    else:
+        print("[i] CO-OPTIMIZATION INACTIVE: Executing Standard Uniform Sweep.")
+        print(f"    - All wing sections default to baseline uniform profile: {AIRFOIL.upper()}")
+    print("-" * 70)
 
     # ─── CORE SELECTION ───────────────────────────────────────────────────────
     default_cores = 32
@@ -767,125 +1297,515 @@ if __name__ == "__main__":
         except ValueError:
             print("    Invalid input, please enter an integer.")
 
-    ckpt_file   = os.path.join(OUTPUT_DIR, "checkpoint.pkl")
-    ckpt_exists = os.path.exists(ckpt_file)
+    ckpt_file = os.path.join(OUTPUT_DIR, "checkpoint.pkl")
+    
+    # ─── CORE EXECUTION CONTROL LOOP ──────────────────────────────────────────
+    # This allows looping back to extend generations OR entering airfoil modules
+    while True:
+        ckpt_exists = os.path.exists(ckpt_file)
+        extra = 0
+        pop_size = 32
 
-    if ckpt_exists:
-        current_gen_preview = getattr(pickle.load(open(ckpt_file, "rb")), "n_iter", 0)
-        print(f"\n[i] Existing checkpoint found — generation {current_gen_preview} completed.")
-        
-        # Extract and inform population metrics from restored state
-        with open(ckpt_file, "rb") as f:
-            temp_alg = pickle.load(f)
-            active_pop = getattr(temp_alg, "pop_size", "Unknown")
-        print(f"[i] Population size restored from checkpoint: {active_pop} wings")
-
-        while True:
+        if ckpt_exists:
             try:
-                extra_input = input("How many MORE generations do you wish to run? (Enter = default 10): ").strip()
-                if not extra_input:
-                    extra = 10
+                with open(ckpt_file, "rb") as f:
+                    temp_alg = pickle.load(f)
+                current_gen_preview = getattr(temp_alg, "n_iter", 0)
+                active_pop = getattr(temp_alg, "pop_size", "Unknown")
+                print(f"\n[i] Existing checkpoint found — generation {current_gen_preview} completed.")
+                print(f"[i] Population size restored from checkpoint: {active_pop} wings")
+            except Exception:
+                print("\n[!] Failed to preview checkpoint. Proceeding as active.")
+            
+            skip_opt = False
+            while True:
+                ans_skip = input("\n[?] Bypass planform generations and jump straight to Airfoil Co-Optimization? (Y/N) [Enter = N]: ").strip().lower()
+                if not ans_skip:
+                    ans_skip = 'n'
+                if ans_skip in ['y', 'n']:
+                    skip_opt = (ans_skip == 'y')
                     break
-                extra = int(extra_input)
-                if extra > 0:
+                print("    Please answer 'Y' or 'N'.")
+                
+            if skip_opt:
+                extra = 0
+            else:
+                while True:
+                    try:
+                        extra_input = input("How many MORE generations do you wish to run? (Enter = default 10): ").strip()
+                        if not extra_input:
+                            extra = 10
+                            break
+                        extra = int(extra_input)
+                        if extra > 0:
+                            break
+                        print("    Please enter a positive integer.")
+                    except ValueError:
+                        print("    Invalid input, please enter an integer.")
+        else:
+            print("\n[i] No checkpoint found — starting fresh optimization.")
+            default_pop = 32
+            while True:
+                pop_input = input(f"Wings per generation (pop_size)? (Enter = default {default_pop}): ").strip()
+                if not pop_input:
+                    pop_size = default_pop
                     break
-                print("    Please enter a positive integer.")
-            except ValueError:
-                print("    Invalid input, please enter an integer.")
-    else:
-        print("\n[i] No checkpoint found — starting fresh optimization.")
-        
-        default_pop = 32
-        while True:
-            pop_input = input(f"Wings per generation (pop_size)? (Enter = default {default_pop}): ").strip()
-            if not pop_input:
-                pop_size = default_pop
+                try:
+                    pop_size = int(pop_input)
+                    if pop_size > 0:
+                        break
+                    print("    Please enter a positive integer.")
+                except ValueError:
+                    print("    Invalid input, please enter an integer.")
+
+            while True:
+                try:
+                    extra_input = input("How many generations do you wish to run? (Enter = default 20): ").strip()
+                    if not extra_input:
+                        extra = 20
+                        break
+                    extra = int(extra_input)
+                    if extra > 0:
+                        break
+                    print("    Please enter a positive integer.")
+                except ValueError:
+                    print("    Invalid input, please enter an integer.")
+
+        print(f"\n[i] Launching: Activating {num_cores} cores...")
+        sys.stdout.flush()
+        write_worker_script()
+
+        lock    = multiprocessing.Lock()
+        pool    = multiprocessing.Pool(num_cores, initializer=init_worker, initargs=(lock,))
+        runner  = StarmapParallelization(pool.starmap)
+        problem = WingOptimization(runner=runner, wake_iterations=wake_iterations)
+
+        if ckpt_exists:
+            print("\n[i] Restored previous optimization state!")
+            try:
+                with open(ckpt_file, "rb") as f:
+                    algorithm = pickle.load(f)
+                algorithm.display = WingDisplay()
+                algorithm.display.verbose = True
+                current_gen = getattr(algorithm, "n_iter", 0)
+                target_gen  = current_gen + extra
+                from pymoo.termination import get_termination
+                algorithm.termination = get_termination("n_gen", target_gen)
+                problem.elementwise_runner = runner
+                if hasattr(algorithm, "problem"):
+                    algorithm.problem = problem
+                print(f"[i] Resuming from gen {current_gen} → Target: gen {target_gen} ({extra} more)")
+            except Exception as e:
+                print(f"[!] Failed to load checkpoint: {e}. Aborting run.")
+                pool.terminate()
+                pool.join()
                 break
-            try:
-                pop_size = int(pop_input)
-                if pop_size > 0:
-                    break
-                print("    Please enter a positive integer.")
-            except ValueError:
-                print("    Invalid input, please enter an integer.")
+        else:
+            print("\n[i] Starting new optimization...")
+            algorithm = NSGA2(
+                pop_size=pop_size,
+                n_offsprings=pop_size,
+                sampling=FloatRandomSampling(),
+                crossover=SBX(prob=0.9, eta=15),
+                mutation=PM(eta=20),
+                eliminate_duplicates=True,
+            )
+            target_gen = extra
+            print(f"[i] Pop size: {pop_size} | Target: {target_gen} generations")
 
-        while True:
-            try:
-                extra_input = input("How many generations do you wish to run? (Enter = default 20): ").strip()
-                if not extra_input:
-                    extra = 20
-                    break
-                extra = int(extra_input)
-                if extra > 0:
-                    break
-                print("    Please enter a positive integer.")
-            except ValueError:
-                print("    Invalid input, please enter an integer.")
-
-    print(f"\n[i] Launching: Activating {num_cores} cores...")
-    sys.stdout.flush()
-    write_worker_script()
-
-    lock    = multiprocessing.Lock()
-    pool    = multiprocessing.Pool(num_cores, initializer=init_worker, initargs=(lock,))
-    runner  = StarmapParallelization(pool.starmap)
-    problem = WingOptimization(runner=runner, wake_iterations=wake_iterations)
-
-    if ckpt_exists:
-        print("\n[i] Restored previous optimization state!")
-        with open(ckpt_file, "rb") as f:
-            algorithm = pickle.load(f)
+        rnd_seed = random.randint(1, 10000)
+        res = None
+        algorithm.verbose = True
         algorithm.display = WingDisplay()
-        algorithm.display.verbose = True
-        current_gen = getattr(algorithm, "n_iter", 0)
-        target_gen  = current_gen + extra
-        from pymoo.termination import get_termination
-        algorithm.termination = get_termination("n_gen", target_gen)
-        problem.elementwise_runner = runner
-        if hasattr(algorithm, "problem"):
-            algorithm.problem = problem
-        print(f"[i] Resuming from gen {current_gen} → Target: gen {target_gen} ({extra} more)")
+
         sys.stdout.flush()
-    else:
-        print("\n[i] Starting new optimization...")
-        algorithm = NSGA2(
-            pop_size=pop_size,
-            n_offsprings=pop_size,
-            sampling=FloatRandomSampling(),
-            crossover=SBX(prob=0.9, eta=15),
-            mutation=PM(eta=20),
-            eliminate_duplicates=True,
-        )
-        target_gen = extra
-        print(f"[i] Pop size: {pop_size} | Target: {target_gen} generations")
+        try:
+            res = minimize(
+                problem, algorithm,
+                ("n_gen", target_gen),
+                seed=rnd_seed,
+                copy_algorithm=False,
+                verbose=True,
+                display=WingDisplay(),
+                callback=FlushCallback(),
+                save_history=True,
+            )
+            print("\n" + "=" * 70)
+            print("GENERATION BATCH COMPLETED SUCCESSFULLY!")
+            print("=" * 70)
+        except KeyboardInterrupt:
+            print("\n\n[!] Interrupted by user.")
+        finally:
+            pool.terminate()
+            pool.join()
+            save_results(algorithm, res)
+
+        # ─── POST-OPTIMIZATION CONTROL LOGIC ──────────────────────────────────
         sys.stdout.flush()
+        while True:
+            ans_airfoil = input("\nDo you wish to proceed to Airfoil Co-Optimization? (Y/N): ").strip().lower()
+            if ans_airfoil in ['y', 'n']:
+                break
+            print("    Please answer 'Y' or 'N'.")
 
-    rnd_seed = random.randint(1, 10000)
-    res = None
+        if ans_airfoil == 'y':
+            print("\n" + "═" * 70)
+            print(" ENTERING AIRFOIL CO-OPTIMIZATION MODULE")
+            print("═" * 70)
+            
+            # Auto-run performance plotter to show the Pareto front to the user
+            try:
+                plotter_bat = os.path.join(WORK_DIR, "RUN_PERFORMANCE_PLOTTER.bat")
+                if os.path.exists(plotter_bat):
+                    print("[*] Launching Performance Plotter in a new window...")
+                    # 'start' ensures it opens in a separate, non-blocking CMD window
+                    subprocess.Popen(f'start "" "{plotter_bat}"', shell=True)
+                    time.sleep(1.0)
+            except Exception as e:
+                print(f"[i] Could not auto-launch plotter: {e}")
+            
+            # Prompt for specific candidate index from Pareto front
+            pareto_json = os.path.join(OUTPUT_DIR, "pareto_results.json")
+            if not os.path.exists(pareto_json):
+                print("[!] No Pareto results found! Please complete an optimization run first.")
+                continue
+                
+            try:
+                with open(pareto_json, "r") as f:
+                    pareto_data = json.load(f)
+            except Exception as e:
+                print(f"[!] Failed to load Pareto data: {e}")
+                continue
+                
+            if not pareto_data:
+                print("[!] Pareto list is empty! No feasible wings to select.")
+                continue
+                
+            while True:
+                idx_input = input(f"\nEnter index of wing to optimize from Pareto front (1-{len(pareto_data)}): ").strip()
+                try:
+                    wing_idx = int(idx_input)
+                    if 1 <= wing_idx <= len(pareto_data):
+                        selected_wing = next((w for w in pareto_data if w["solution_id"] == wing_idx), None)
+                        if selected_wing:
+                            break
+                    print(f"    Please enter an index between 1 and {len(pareto_data)}.")
+                except ValueError:
+                    print("    Invalid input, please enter an integer.")
+            
+            print(f"\n[✓] Selected Wing Solution ID #{selected_wing['solution_id']} (CL={selected_wing['CL']}, L/D={selected_wing['LD']})")
+            
+            # Extract target geometric boundaries
+            AR_sel          = selected_wing["AR"]
+            kink_frac_sel   = selected_wing["kink_frac"]
+            t_inner_sel     = selected_wing["t_inner"]
+            t_outer_sel     = selected_wing["t_outer"]
+            sweep_inner_sel = selected_wing["sweep_inner"]
+            sweep_outer_sel = selected_wing["sweep_outer"]
+            
+            print(f"[i] Base Geometry parameters pulled: AR={AR_sel} | Kink={kink_frac_sel} | t={t_inner_sel}/{t_outer_sel}")
+            
+            # Prompt for section extraction count (N)
+            while True:
+                sec_input = input("\nEnter number of extraction sections (N) [e.g. 3 = Root/Kink/Tip]: ").strip()
+                try:
+                    num_sec = int(sec_input)
+                    if num_sec >= 2:
+                        break
+                    print("    Please enter at least 2 sections.")
+                except ValueError:
+                    print("    Invalid input, please enter an integer.")
+            
+            # Run scientific extraction
+            print(f"\n[*] Computing local flow conditions for {num_sec} stations...")
+            results = extract_sectional_properties(selected_wing, num_sec)
+            
+            if not results:
+                print("[!] Geometry calculations failed.")
+                continue
+                
+            # Display Gorgeous Mathematical Properties Table (ASCII-safe)
+            print("\n" + "=" * 80)
+            print(f" STATIONARY EXTRACTION REPORT — SOLUTION #{selected_wing['solution_id']}")
+            print("=" * 80)
+            print(f"{'Sec ID':^8} | {'Zone':^8} | {'y [m]':^10} | {'Chord [m]':^10} | {'Twist [deg]':^12} | {'Alpha [deg]':^12} | {'Re':^10}")
+            print("-" * 80)
+            for s in results["sections"]:
+                print(f"{s['id']:^8} | {s['zone']:^8} | {s['y_loc']:^10.3f} | {s['chord']:^10.3f} | {s['twist']:^12.2f} | {s['alpha']:^12.2f} | {s['Re']:^10,}")
+            print("=" * 80)
+            
+            print("\n[✓] Section properties successfully computed!")
+            
+            # ─── STEP 2: RUN PARALLEL AIRFOIL SWEEPER ────────────────────────
+            print("\n" + "=" * 80)
+            print(" AUTONOMOUS CANDIDATE SWEEP SELECTION")
+            print("=" * 80)
+            print("Available catalogs for aerodynamic profile matching:")
+            print("  [1] Low_Re     (Curated profiles for low speeds)")
+            print("  [2] Medium_Re  (Curated profiles for general speeds)")
+            print("  [3] High_Re    (Curated high-efficiency profiles)")
+            print("  [4] UIUC_All   (Full UIUC database, ~1650 airfoils - recommended, slow)")
+            print("  [5] Reflexed   (Tailless / BWB self-trimming sections)")
 
-    # Enforce updated display layout structures
-    algorithm.verbose = True
-    algorithm.display = WingDisplay()
+            catalog_map = {"1": "Low_Re", "2": "Medium_Re", "3": "High_Re",
+                           "4": "UIUC_All", "5": "Reflexed"}
+            _rev_map = {v: k for k, v in catalog_map.items()}
+            _default_choice = _rev_map.get(AIRFOIL_CATALOG, "5" if BWB_MODE else "2")
 
-    try:
-        res = minimize(
-            problem, algorithm,
-            ("n_gen", target_gen),
-            seed=rnd_seed,
-            copy_algorithm=False,
-            verbose=True,
-            display=WingDisplay(),
-            callback=FlushCallback(),
-            save_history=True,
-        )
-        print("\n" + "=" * 70)
-        print("OPTIMIZATION COMPLETED SUCCESSFULLY!")
+            while True:
+                cat_input = input(f"\nSelect catalog number (1-5) [Enter = default {_default_choice} ({catalog_map[_default_choice]})]: ").strip()
+                if not cat_input:
+                    cat_choice = _default_choice
+                    break
+                if cat_input in catalog_map:
+                    cat_choice = cat_input
+                    break
+                print("    Please choose between 1 and 5.")
 
-    except KeyboardInterrupt:
-        print("\n\n[!] Stopped by user.")
+            catalog_folder = catalog_map[cat_choice]
+            # Note: airfoil_database lives in the parent dir or root, SCRIPT_DIR points to system_files
+            catalog_path = os.path.join(os.path.dirname(SCRIPT_DIR), "airfoil_database", catalog_folder)
+            
+            if not os.path.exists(catalog_path):
+                print(f"[!] Path invalid: {catalog_path}. Defaulting to Medium_Re.")
+                catalog_path = os.path.join(os.path.dirname(SCRIPT_DIR), "airfoil_database", "Medium_Re")
 
-    finally:
-        # Terminate remaining workers safely
-        pool.terminate()
-        pool.join()
-        save_results(algorithm, res)
+            # Perform parallel sweeps!
+            print(f"\n[*] Commencing batch aerodynamic matching using {num_cores} cores...")
+            selections = sweep_candidates_for_sections(results["sections"], catalog_path, num_cores)
+            
+            if not selections:
+                print("\n[!] Sweeping failed or aborted.")
+                continue
+                
+            # Display Golden Summary!
+            print("\n" + "=" * 80)
+            print(" OPTIMAL SECTIONAL MATCHING RECOMMENDATIONS")
+            print("=" * 80)
+            print(f"{'Sec':^4} | {'Zone':^6} | {'Winning Airfoil':^25} | {'Avg L/D':^10} | {'Avg CM':^10}")
+            print("-" * 80)
+            for sec_id, data in selections.items():
+                if not data:
+                    print(f" {sec_id:<2} | --- | {'[NO CONVERGENCE]':^25} | {'---':^10} | {'---':^10}")
+                else:
+                    print(f" {data['id']:^2} | {data['zone']:^6} | {data['winner']:^25} | {data['winner_ld']:^10.2f} | {data['winner_cm']:^10.4f}")
+            print("=" * 80)
+            
+            # --- AUTO-PLOT WINNING AIRFOILS ---
+            import matplotlib.pyplot as plt
+            try:
+                plt.figure(figsize=(10, 5))
+                plt.title("Optimal Sectional Airfoils", fontweight='bold')
+                plt.xlabel("x/c")
+                plt.ylabel("y/c")
+                plt.grid(True, linestyle='--', alpha=0.6)
+                plt.axis("equal")
+                for sec_id, data in selections.items():
+                    if data and data["winner"]:
+                        af_path = os.path.join(catalog_path, data["winner"])
+                        if os.path.exists(af_path):
+                            coords = []
+                            with open(af_path, "r") as f:
+                                lines = f.readlines()
+                                # handle headers by skipping alphanumeric lines
+                                for line in lines:
+                                    pts = line.split()
+                                    if len(pts) >= 2:
+                                        try:
+                                            coords.append([float(pts[0]), float(pts[1])])
+                                        except ValueError:
+                                            pass
+                            if coords:
+                                coords = np.array(coords)
+                                plt.plot(coords[:,0], coords[:,1], label=f"Sec {sec_id} ({data['zone']}): {data['winner']}")
+                plt.legend()
+                plt.tight_layout()
+                print("\n[*] Opening Interactive Airfoil Viewer... (Close the window to proceed)")
+                plt.show()
+            except Exception as e:
+                print(f"[!] Could not display airfoil plotter: {e}")
+                
+            # ─── AUTONOMOUS XFOIL GEOMETRIC REFINEMENT INTEGRATION ───────────
+            print("\n" + "=" * 80)
+            while True:
+                ans_opt_geom = input("Perform autonomous geometry optimization (tweak thickness/camber) to boost L/D while keeping CM constant? (Y/N): ").strip().lower()
+                if ans_opt_geom in ['y', 'n']:
+                    break
+                print("    Please answer 'Y' or 'N'.")
+                
+            if ans_opt_geom == 'y':
+                print("\n[*] Commencing parallel geometric tweaks on winning airfoils...")
+                
+                # Prepare safe folder for custom refined coordinates
+                active_af_dir = os.path.join(SCRIPT_DIR, "active_airfoils")
+                os.makedirs(active_af_dir, exist_ok=True)
+                
+                for sec_id, data in selections.items():
+                    if not data or not data["winner"]:
+                        continue
+                        
+                    sec_data = results["sections"][sec_id - 1]
+                    
+                    # Target conditions for optimizer
+                    af_path = os.path.join(catalog_path, data["winner"])
+                    Re = sec_data["Re"]
+                    alpha = sec_data["alpha"]
+                    target_cm = data["winner_cm"]
+                    
+                    print(f"\n>>> Optimizing Section #{sec_id} ({data['zone']}) based on {data['winner']}...")
+                    
+                    opt_res = optimize_airfoil_geometry(af_path, Re, alpha, target_cm, num_cores)
+                    if opt_res and opt_res["best"]["factors"] != (1.0, 1.0):
+                        best_data = opt_res["best"]
+                        base_data = opt_res["baseline"]
+                        
+                        # Correctly compare the baseline AT THIS EXACT ALPHA to the tweaked shape
+                        old_ld = base_data["ld"] if base_data else data["winner_ld"]
+                        old_cm = base_data["cm"] if base_data else data["winner_cm"]
+                        new_ld = best_data["ld"]
+                        new_cm = best_data["cm"]
+                        
+                        print(f"\n    [?] GEOMETRY OPTIMIZATION PROPOSAL (Section #{sec_id}):")
+                        print(f"        Original L/D: {old_ld:^8.1f}  ->  Tweaked L/D: {new_ld:^8.1f}")
+                        print(f"        Original CM:  {old_cm:^8.4f}  ->  Tweaked CM:  {new_cm:^8.4f}")
+                        
+                        while True:
+                            ans_acc = input("        Accept this tweaked shape? (Y/N) [Enter = Y]: ").strip().lower()
+                            if not ans_acc: ans_acc = 'y'
+                            if ans_acc in ['y', 'n']: break
+                            print("        Please answer Y or N.")
+                            
+                        if ans_acc == 'y':
+                            # Discovery! Export tweaked profile
+                            t_fac, c_fac = best_data["factors"]
+                            
+                            safe_af_name = data["winner"].lower().replace(".dat", "")
+                            custom_filename = f"opt_{data['zone'].lower()}_{safe_af_name}_t{t_fac:.2f}_c{c_fac:.2f}.dat"
+                            export_path = os.path.abspath(os.path.join(active_af_dir, custom_filename))
+                            
+                            # Single XFOIL run to generate and save coordinate geometry
+                            analyze_airfoil(
+                                af_path, 
+                                Re, 
+                                mach=0.1, 
+                                alphas=[round(alpha, 2)], 
+                                geom_factors=(t_fac, c_fac), 
+                                save_coords_path=export_path
+                            )
+                            
+                            if os.path.exists(export_path):
+                                print(f"    [✓] Successfully applied optimized coordinate file: {custom_filename}")
+                                # Re-route selection pointers
+                                data["winner"] = custom_filename
+                                data["winner_path"] = export_path # direct absolute path
+                                data["winner_ld"] = best_data["ld"]
+                                data["winner_cm"] = best_data["cm"]
+                            else:
+                                print("    [!] Coordinate extraction failure. Reverting to baseline shape.")
+                        else:
+                            print(f"    [i] Tweak rejected. Retaining baseline shape for Section #{sec_id}.")
+                    else:
+                        print(f"    [i] Baseline profile is the optimal geometric variant for Section #{sec_id}.")
+                        
+
+                        
+                # Print Revised recommendations table
+                print("\n" + "=" * 80)
+                print(" REVISED SECTIONAL RECOMMENDATIONS (AFTER GEOMETRIC REFINEMENT)")
+                print("=" * 80)
+                print(f"{'Sec':^4} | {'Zone':^6} | {'Winning Airfoil':^25} | {'Avg L/D':^10} | {'Avg CM':^10}")
+                print("-" * 80)
+                for sec_id, data in selections.items():
+                    if not data:
+                        print(f" {sec_id:<2} | --- | {'[NO CONVERGENCE]':^25} | {'---':^10} | {'---':^10}")
+                    else:
+                        disp_name = data["winner"]
+                        print(f" {data['id']:^2} | {data['zone']:^6} | {disp_name:^25} | {data['winner_ld']:^10.2f} | {data['winner_cm']:^10.4f}")
+                print("=" * 80)
+
+            # ─── BACK-FEED TO OPENVSP TRIGGER ────────────────────────────────
+            print("\n" + "=" * 80)
+            while True:
+                ans_feed = input("Back-feed these winning profiles into OpenVSP for Phase-2 Optimization? (Y/N): ").strip().lower()
+                if ans_feed in ['y', 'n']:
+                    break
+                print("    Please enter Y or N.")
+                
+            if ans_feed == 'y':
+                sec_ids = sorted(list(selections.keys()))
+                active_af_dir = os.path.join(SCRIPT_DIR, "active_airfoils")
+                os.makedirs(active_af_dir, exist_ok=True)
+                
+                root_data = selections.get(sec_ids[0])
+                tip_data  = selections.get(sec_ids[-1])
+                mid_idx   = len(sec_ids) // 2
+                kink_data = selections.get(sec_ids[mid_idx])
+                
+                new_config = {}
+                
+                def deploy_airfoil(zone, data_dict):
+                    if not data_dict or not data_dict.get("winner"):
+                        print(f"[i] Section {zone.upper()} has no valid convergence data. Defaulting.")
+                        return AIRFOIL
+                    
+                    filename = data_dict["winner"]
+                    
+                    # Detect if file already resides in local active directory from optimization
+                    if "winner_path" in data_dict and os.path.exists(data_dict["winner_path"]):
+                        src_path = data_dict["winner_path"]
+                    else:
+                        src_path = os.path.join(catalog_path, filename)
+                        
+                    dst_path = os.path.abspath(os.path.join(active_af_dir, f"phase2_{zone}_{filename}"))
+                    
+                    if os.path.abspath(src_path) == os.path.abspath(dst_path):
+                        return dst_path
+                        
+                    try:
+                        shutil.copyfile(src_path, dst_path)
+                        return dst_path
+                    except Exception as e:
+                        print(f"[!] Deployment copy error for {zone} ({filename}): {e}")
+                        return src_path
+                        
+                print("\n[*] Finalizing deployment of optimal profiles for co-optimization feedback loop...")
+                new_config["root"] = deploy_airfoil("root", root_data)
+                new_config["kink"] = deploy_airfoil("kink", kink_data)
+                new_config["tip"]  = deploy_airfoil("tip", tip_data)
+                
+                # Persist mapping config JSON
+                try:
+                    with open(ACTIVE_AIRFOILS_CONFIG, "w", encoding="utf-8") as f:
+                        json.dump(new_config, f, indent=2)
+                    
+                    # Live update global registry in active runtime memory
+                    ACTIVE_AIRFOILS.update(new_config)
+                    
+                    print(f"\n[✓] AIRFOILS SUCCESSFULLY BACK-FED INTO SYSTEM!")
+                    print(f"[i] Active Config: {ACTIVE_AIRFOILS_CONFIG}")
+                    print("    - Root Station: " + os.path.basename(ACTIVE_AIRFOILS["root"]))
+                    print("    - Kink Station: " + os.path.basename(ACTIVE_AIRFOILS["kink"]))
+                    print("    - Tip Station:  " + os.path.basename(ACTIVE_AIRFOILS["tip"]))
+                    print("\nAll future OpenVSP wing models generated in this optimization cycle")
+                    print("will automatically instantiate with these specialized profiles!")
+                except Exception as e:
+                    print(f"[!] Failed to save back-feed configuration: {e}")
+            
+            print("\n[✓] Iterative planform-airfoil co-optimization cycle completed!")
+            print("Exiting solver UI loop safely.")
+            break
+
+        # If user declined airfoil module, ask if they want to extend planform runs
+        while True:
+            ans_cont = input("Do you wish to continue running the Planform Optimization? (Y/N): ").strip().lower()
+            if ans_cont in ['y', 'n']:
+                break
+            print("    Please answer 'Y' or 'N'.")
+
+        if ans_cont == 'y':
+            # Continues execution loop, will automatically see ckpt_exists and prompt extra_gen
+            continue
+        else:
+            print("\n[✓] Optimization workflow complete. Exiting RAPID. Goodbye!")
+            break
+
