@@ -5,14 +5,13 @@ title RAPID WING PLANFORM OPTIMIZER
 chcp 65001 > nul
 cls
 echo ======================================================================
-echo        RAPID WING PLANFORM OPTIMIZATION ENGINE
+echo   RAPID WING PLANFORM OPTIMIZER
 echo ======================================================================
 echo.
-
 set "PYEXE=%SCRIPT_DIR%system_files\python_runtime\python.exe"
+if not exist "%PYEXE%" set "PYEXE=%SCRIPT_DIR%.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 "%PYEXE%" ".\system_files\planform_opti.py"
-
 echo.
-echo Execution completed or stopped. Press any key to close...
+echo Done. Press any key to close...
 pause > nul

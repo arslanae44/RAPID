@@ -71,3 +71,6 @@ system_files/test_debug.py
 
 # Per-user active config (defaults live in rapid_config.py); BWB preset stays tracked
 system_files/rapid_config.json
+
+# Local Python 3.13 environment created by SETUP.bat
+.venv/
