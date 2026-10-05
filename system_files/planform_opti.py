@@ -556,7 +556,8 @@ def ask_int(prompt, default, minimum, interactive):
     if not interactive:
         return default
     while True:
-        raw = input(f"{prompt} (Enter = default {default}): ").strip()
+        raw = airfoil_opti.read_input(f"{prompt} (Enter = default {default}): ")
+        raw = (raw or "").strip()
         if not raw:
             return default
         try:
@@ -573,7 +574,10 @@ def ask_yn(prompt, default, interactive):
         return default
     d = "Y" if default else "N"
     while True:
-        a = (input(f"{prompt} (Y/N) [Enter = {d}]: ").strip() or d).lower()
+        a = airfoil_opti.read_input(f"{prompt} (Y/N) [Enter = {d}]: ")
+        if a is None:
+            return default
+        a = (a.strip() or d).lower()
         if a in ("y", "n"):
             return a == "y"
         print("    Please answer 'Y' or 'N'.")
@@ -617,7 +621,11 @@ def run_phase2(num_cores, interactive, wing_id=None):
     if wing_id is None and not interactive:
         wing_id = max(pareto, key=lambda w: w["LD"])["solution_id"]   # headless: best-L/D wing
     while wing_id is None:
-        raw = input(f"\nIndex of the Pareto wing to co-optimize (1-{len(pareto)}): ").strip()
+        raw = airfoil_opti.read_input(f"\nIndex of the Pareto wing to co-optimize (1-{len(pareto)}): ")
+        if raw is None:
+            print("[i] No input available; skipping airfoil co-optimization.")
+            return False
+        raw = raw.strip()
         if raw.isdigit() and any(w["solution_id"] == int(raw) for w in pareto):
             wing_id = int(raw)
         else:

@@ -381,12 +381,24 @@ def optimize_airfoil_geometry(airfoil_path, Re, target_alpha, original_cm, num_c
 
 
 # ─── PIPELINE ────────────────────────────────────────────────────────────────
+def read_input(prompt):
+    """input() that returns None when stdin is closed (e.g. piped answers ran out)."""
+    try:
+        return input(prompt)
+    except EOFError:
+        print()
+        return None
+
+
 def _ask_yn(prompt, default, interactive):
     if not interactive:
         return default
     d = "Y" if default else "N"
     while True:
-        a = input(f"{prompt} (Y/N) [Enter = {d}]: ").strip().lower() or d.lower()
+        a = read_input(f"{prompt} (Y/N) [Enter = {d}]: ")
+        if a is None:
+            return default
+        a = a.strip().lower() or d.lower()
         if a in ("y", "n"):
             return a == "y"
         print("    Please answer 'Y' or 'N'.")
@@ -403,7 +415,8 @@ def choose_catalog(default, interactive):
         print(f"  [{i}] {c:<10} ({labels[c]})")
     d = str(CATALOGS.index(default) + 1) if default in CATALOGS else "2"
     while True:
-        a = input(f"Select catalog (1-{len(CATALOGS)}) [Enter = {d} ({CATALOGS[int(d) - 1]})]: ").strip() or d
+        a = read_input(f"Select catalog (1-{len(CATALOGS)}) [Enter = {d} ({CATALOGS[int(d) - 1]})]: ")
+        a = (a or "").strip() or d
         if a.isdigit() and 1 <= int(a) <= len(CATALOGS):
             return CATALOGS[int(a) - 1]
         print("    Invalid choice.")
