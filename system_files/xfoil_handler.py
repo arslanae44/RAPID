@@ -235,6 +235,9 @@ def analyze_airfoil(airfoil_path, reynolds, mach=0.0, alphas=[0.0], max_iter=100
                             pass
         except Exception as e:
              print(f"[!] Parsing failed for polar file: {e}")
+        # The 0-deg warm-up point is only a convergence aid: report requested alphas only.
+        results = {a: d for a, d in results.items()
+                   if any(abs(a - float(req)) < 0.05 for req in alphas)}
     else:
         # Print raw log to understand failure
         try:

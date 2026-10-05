@@ -51,6 +51,19 @@ def _ask_float(prompt, current):
             print("    Enter a number, blank to keep, or - to go back.")
 
 
+def _ask_int(prompt, current):
+    while True:
+        raw = input(prompt).strip()
+        if raw == "":
+            return current
+        if raw == "-":
+            return BACK
+        try:
+            return int(raw)
+        except ValueError:
+            print("    Enter an integer, blank to keep, or - to go back.")
+
+
 def _ask_optfloat(prompt, current):
     raw = input(prompt).strip()
     if raw == "":
@@ -140,6 +153,8 @@ def main():
             prompt = f"   value  [default={_fmt(default_v)} | current={_fmt(current)}]: "
             if typ == "float":
                 res = _ask_float(prompt, current)
+            elif typ == "int":
+                res = _ask_int(prompt, current)
             elif typ == "optfloat":
                 res = _ask_optfloat(prompt, current)
             elif typ == "bool":
@@ -159,9 +174,9 @@ def main():
         i += 1
 
     # assemble config, preserving any prior keys the editor does not manage
-    new_cfg = {"flight": {}, "bounds": {}, "constraints": {}, "bwb": {}}
+    new_cfg = {}
     for (section, key), val in answers.items():
-        new_cfg[section][key] = val
+        new_cfg.setdefault(section, {})[key] = val
     merged = _deep_merge(raw_saved, new_cfg)
     path = save_config(merged, DEFAULT_CONFIG_PATH)
 

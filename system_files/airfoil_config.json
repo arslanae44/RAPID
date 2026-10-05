@@ -1,0 +1,9 @@
+{
+  "vsp3": "system_files/presets/example_transport_wing.vsp3",
+  "wing_name": null,
+  "n_sections": 5,
+  "catalog": "Medium_Re",
+  "cores": null,
+  "refine": true,
+  "write_active": true
+}

@@ -6,7 +6,7 @@ import numpy as np
 # ─── PATHS (PORTABLE & DYNAMIC) ───────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR   = os.path.dirname(SCRIPT_DIR)
-OUTPUT_DIR = os.path.join(WORK_DIR, "wing_models")
+OUTPUT_DIR = os.environ.get("RAPID_OUTPUT_DIR") or os.path.join(WORK_DIR, "wing_models")
 JSON_PATH  = os.path.join(OUTPUT_DIR, "pareto_results.json")
 
 # Create PLOTS directory safely
@@ -23,9 +23,18 @@ def get_incremental_save_path():
         counter += 1
 
 # ─── GEOMETRY PARAMETERS ──────────────────────────────────────────────────────
-S_REF         = 210.0
-FUSELAGE_Y    = 2.2
-HALF_SPAN_MAX = 25.0
+# Read from the active config so the plots match the optimized aircraft.
+import sys
+sys.path.insert(0, SCRIPT_DIR)
+from rapid_config import load_effective_config
+_CFG = load_effective_config()
+S_REF         = float(_CFG["flight"]["S_REF"])
+FUSELAGE_Y    = float(_CFG["geometry"]["FUSELAGE_Y"])
+HALF_SPAN_MAX = float(_CFG["geometry"]["HALF_SPAN_MAX"])
+LD_MIN        = float(_CFG["constraints"]["LD_MIN"])
+CL_MIN        = float(_CFG["constraints"]["CL_MIN"])
+CM_MAX        = float(_CFG["constraints"]["CM_MAX"])
+BWB_MODE      = bool(_CFG["bwb"]["BWB_MODE"])
 
 # ─── DATA LOADING UTILITIES ───────────────────────────────────────────────────
 def load_pareto():
@@ -89,7 +98,7 @@ def load_all_history():
                 
                 # Eliminate outlier points
                 if 0.0 < cl < 3.0 and -5.0 < ld < 60.0:
-                    is_feas = (0.15 <= cl) and (ld >= 15.0) and (cm <= 0.35)
+                    is_feas = (CL_MIN <= cl) and (ld >= LD_MIN) and (BWB_MODE or cm <= CM_MAX)
                     all_points.append({"CL": cl, "LD": ld, "feasible": is_feas})
         except Exception:
             pass
@@ -202,7 +211,7 @@ def plot_dashboard(pareto, all_pop):
             color="black", fontsize=8, fontweight="normal", va="bottom", ha="left"
         )
 
-    ax_pareto.axhline(15.0, color="red", linestyle=":", linewidth=1.5, alpha=0.8, label="Min L/D = 15 Boundary")
+    ax_pareto.axhline(LD_MIN, color="red", linestyle=":", linewidth=1.5, alpha=0.8, label=f"Min L/D = {LD_MIN:g} Boundary")
     ax_pareto.set_facecolor("#fcfcfc")
     ax_pareto.set_title("Pareto Front & Optimization History",
                          fontsize=15, fontweight="bold", color="black", pad=15)
@@ -247,13 +256,13 @@ def plot_dashboard(pareto, all_pop):
         # Fuselage centerline block
         ax.fill(
             [-FUSELAGE_Y, FUSELAGE_Y, FUSELAGE_Y, -FUSELAGE_Y],
-            [0, 0, -8, -8],
+            [0, 0, min(y) * 1.4, min(y) * 1.4],
             color="#e0e0e0", alpha=0.8, edgecolor="#888888", linewidth=1.2
         )
 
         b_half = min(np.sqrt(d["AR"] * S_REF) / 2.0, HALF_SPAN_MAX)
-        ax.set_xlim(-b_half - 2, b_half + 2)
-        ax.set_ylim(-14.5, 2)
+        ax.set_xlim(-b_half * 1.08, b_half * 1.08)
+        ax.set_ylim(min(y) * 1.5, 0.1 * b_half)
         ax.set_aspect("equal")
         ax.grid(True, linestyle=":", alpha=0.5, color="gray")
         ax.tick_params(colors="black", labelsize=8)

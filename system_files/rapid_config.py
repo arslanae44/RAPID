@@ -56,6 +56,28 @@ DEFAULTS = {
         "AIRFOIL_CATALOG": "Medium_Re",# airfoil_database sub-folder used by the co-optimization sweep
         "BASELINE_AIRFOIL": "mh60"     # reflexed section seeded on all stations before co-opt (BWB only)
     },
+    "geometry": {
+        "FUSELAGE_Y":    2.2,    # half fuselage width removed from the gross half-span [m]
+        "HALF_SPAN_MAX": 25.0,   # gross half-span cap [m]
+        "C_ROOT_MIN":    4.0,    # admissible root chord [m]; designs outside are rejected
+        "C_ROOT_MAX":    9.5,
+        "N_SECTIONS":    3,      # spanwise airfoil stations (>=3: root, kink, tip + extras)
+    },
+    "mesh": {
+        "TESS_W":     33,        # chordwise tessellation (VLM chordwise resolution)
+        "TESS_U":     24,        # total spanwise tessellation, split over panels by span
+        "WAKE_ITERS": 3,         # VSPAERO wake iterations (0 = fastest)
+        "TIMEOUT_S":  240.0,     # per-wing VSPAERO timeout [s]
+    },
+    "airfoil": {
+        "MIN_TC_ROOT":  0.18,    # thickness screen for the co-opt sweep (fraction of chord)
+        "MIN_TC_MID":   0.16,
+        "MIN_TC_TIP":   0.12,
+        "XFOIL_MACH":   0.1,     # Mach passed to XFOIL (Karman-Tsien correction)
+        "ALPHA_SPREAD": 2.0,     # +/- alpha [deg] around the local design alpha
+        "CM_MIN":      -0.08,    # reject sections with avg Cm below this (conventional)
+        "CM_MIN_BWB":  -0.03,    # ... and in BWB mode (self-trimming sections)
+    },
 }
 
 # ─── EDITOR METADATA ──────────────────────────────────────────────────────────
@@ -88,6 +110,25 @@ PARAM_META = [
     ("bwb",         "CG_X",            "CG x-location [m]",       "optfloat", "Moment reference; blank = 0.25*MAC"),
     ("bwb",         "AIRFOIL_CATALOG", "Airfoil catalog",         "str",   "airfoil_database sub-folder for co-opt sweep"),
     ("bwb",         "BASELINE_AIRFOIL","Baseline reflexed section","str",  "Reflexed .dat seeded before co-opt, e.g. mh60 (BWB only)"),
+
+    ("geometry",    "FUSELAGE_Y",    "Half fuselage width [m]",   "float", "Removed from the gross half-span"),
+    ("geometry",    "HALF_SPAN_MAX", "Max gross half-span [m]",   "float", "Span cap"),
+    ("geometry",    "C_ROOT_MIN",    "Min root chord [m]",        "float", "Smaller root chords are rejected"),
+    ("geometry",    "C_ROOT_MAX",    "Max root chord [m]",        "float", "Larger root chords are rejected"),
+    ("geometry",    "N_SECTIONS",    "Spanwise airfoil stations", "int",   ">=3 (root/kink/tip + extra stations)"),
+
+    ("mesh",        "TESS_W",        "Chordwise tessellation",    "int",   "VLM chordwise resolution"),
+    ("mesh",        "TESS_U",        "Spanwise tessellation",     "int",   "Total over the half-span"),
+    ("mesh",        "WAKE_ITERS",    "VSPAERO wake iterations",   "int",   "0 = fastest"),
+    ("mesh",        "TIMEOUT_S",     "Per-wing timeout [s]",      "float", "Kill VSPAERO after this many seconds"),
+
+    ("airfoil",     "MIN_TC_ROOT",   "Min t/c at root",           "float", "Thickness screen for the co-opt sweep"),
+    ("airfoil",     "MIN_TC_MID",    "Min t/c mid-span",          "float", "Thickness screen for the co-opt sweep"),
+    ("airfoil",     "MIN_TC_TIP",    "Min t/c at tip",            "float", "Thickness screen for the co-opt sweep"),
+    ("airfoil",     "XFOIL_MACH",    "XFOIL Mach",                "float", "Compressibility correction in XFOIL"),
+    ("airfoil",     "ALPHA_SPREAD",  "Alpha spread [deg]",        "float", "+/- around the local design alpha"),
+    ("airfoil",     "CM_MIN",        "Min section Cm",            "float", "Reject more nose-down sections (conventional)"),
+    ("airfoil",     "CM_MIN_BWB",    "Min section Cm (BWB)",      "float", "Reject more nose-down sections (BWB)"),
 ]
 
 
