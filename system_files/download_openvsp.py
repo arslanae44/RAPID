@@ -29,13 +29,54 @@ def pick_py():
     return mm if mm in SUPPORTED_PY else None
 
 
+# Bundled packages in OpenVSP-.../python/, in dependency order. They require each
+# other by name (openvsp -> degen_geom -> utilities) and none is on PyPI, so they
+# must be installed in ONE pip call for pip to resolve them locally.
+API_PACKAGES = ("utilities", "openvsp_config", "degen_geom", "openvsp")
+
+
+def openvsp_importable(target_dir):
+    """Check in a fresh interpreter (this process may have a stale import state)."""
+    code = ("import os,sys; os.add_dll_directory(sys.argv[1]); "
+            "import openvsp; print(openvsp.GetVSPVersion())")
+    r = subprocess.run([sys.executable, "-c", code, target_dir], capture_output=True, text=True)
+    return r.returncode == 0, (r.stdout or r.stderr).strip().splitlines()[-1:] or [""]
+
+
+def install_python_api(target_dir):
+    py_dir = os.path.join(target_dir, "python")
+    pkgs = [os.path.join(py_dir, p) for p in API_PACKAGES if os.path.isdir(os.path.join(py_dir, p))]
+    if not pkgs:
+        print("[!] No bundled Python packages found in " + py_dir)
+        return False
+    print("[*] Installing the OpenVSP Python API: " + ", ".join(os.path.basename(p) for p in pkgs))
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *pkgs])
+    return r.returncode == 0
+
+
+def ensure_python_api(target_dir, py):
+    ok, msg = openvsp_importable(target_dir)
+    if not ok:
+        install_python_api(target_dir)
+        ok, msg = openvsp_importable(target_dir)
+    if ok:
+        print("[SUCCESS] 'import openvsp' works: " + msg[0])
+        return True
+    print("\n[!] OpenVSP binaries are installed, but 'import openvsp' still fails: " + msg[0])
+    print("    Install the bundled packages for your Python {} in one command:".format(py))
+    print('        "{}" -m pip install {}'.format(
+        sys.executable, " ".join('"{}"'.format(os.path.join(target_dir, "python", p)) for p in API_PACKAGES)))
+    return False
+
+
 def main():
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target_dir = os.path.join(base_dir, "system_files", TARGET_NAME)
 
     if os.path.exists(os.path.join(target_dir, "vsp.exe")):
         print("[=] OpenVSP already present at " + target_dir)
-        return
+        # A previous run may have failed to install the Python module: (re)check it.
+        return 0 if ensure_python_api(target_dir, pick_py() or "") else 1
 
     mm = "{}.{}".format(sys.version_info.major, sys.version_info.minor)
     py = pick_py()
@@ -44,7 +85,7 @@ def main():
             mm, VERSION, " and ".join(SUPPORTED_PY)))
         print("    Install Python 3.13 (or 3.11) and re-run, or download manually from")
         print("    " + MANUAL_PAGE)
-        return
+        return 1
 
     url = BASE_URL.format(v=VERSION, py=py)
     print("[*] Downloading OpenVSP {} (Python {}) from:\n    {}".format(VERSION, py, url))
@@ -57,7 +98,7 @@ def main():
         print("[-] Download failed: {}".format(e))
         print("    Get it manually from {} (pick the Python {} win64 build)".format(MANUAL_PAGE, py))
         print("    and extract so vsp.exe is at " + os.path.join(target_dir, "vsp.exe"))
-        return
+        return 1
 
     tmp = os.path.join(base_dir, "system_files", "_openvsp_tmp")
     print("[*] Extracting...")
@@ -71,7 +112,7 @@ def main():
             break
     if src_root is None:
         print("[!] vsp.exe not found in the archive; please extract manually.")
-        return
+        return 1
 
     import shutil
     os.makedirs(target_dir, exist_ok=True)
@@ -81,27 +122,8 @@ def main():
             shutil.move(os.path.join(src_root, item), dst)
     shutil.rmtree(tmp, ignore_errors=True)
     print("[+] OpenVSP ready at " + target_dir)
-
-    # Best-effort install of the bundled Python API (matches this Python build).
-    py_dir = os.path.join(target_dir, "python")
-    if os.path.isdir(py_dir):
-        for pkg in ("openvsp_config", "degen_geom", "openvsp"):
-            pkg_path = os.path.join(py_dir, pkg)
-            if os.path.isdir(pkg_path):
-                try:
-                    subprocess.run([sys.executable, "-m", "pip", "install", pkg_path], check=True)
-                except Exception as e:
-                    print("    [i] pip install {} skipped: {}".format(pkg, e))
-
-    try:
-        import openvsp  # noqa: F401
-        print("[SUCCESS] 'import openvsp' works.")
-    except Exception:
-        print("\n[i] OpenVSP binaries installed, but the Python module is not importable yet.")
-        print("    Install it from the bundled folder for your Python {}:".format(py))
-        print('        pip install "{}"'.format(os.path.join(py_dir, "openvsp")))
-        print("    (install openvsp_config and degen_geom from the same folder first if needed).")
+    return 0 if ensure_python_api(target_dir, py) else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

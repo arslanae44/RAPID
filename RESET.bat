@@ -25,6 +25,8 @@ if exist "%SCRIPT_DIR%wing_models" (
     rd /s /q "%SCRIPT_DIR%wing_models"
 )
 md "%SCRIPT_DIR%wing_models"
+rem keep the tracked placeholder so the reset does not show up as a git change
+type nul > "%SCRIPT_DIR%wing_models\.gitkeep"
 
 echo.
 echo Cleanup completed successfully.

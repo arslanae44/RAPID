@@ -32,7 +32,8 @@ def get_incremental_save_path():
 # Read from the active config so the plots match the optimized aircraft.
 sys.path.insert(0, SCRIPT_DIR)
 from rapid_config import load_effective_config
-_CFG = load_effective_config()
+_RUN_CFG = os.path.join(OUTPUT_DIR, "run_config.json")   # written by the optimizer run
+_CFG = load_effective_config(None if os.environ.get("RAPID_CONFIG_FILE") or not os.path.exists(_RUN_CFG) else _RUN_CFG)
 S_REF         = float(_CFG["flight"]["S_REF"])
 FUSELAGE_Y    = float(_CFG["geometry"]["FUSELAGE_Y"])
 HALF_SPAN_MAX = float(_CFG["geometry"]["HALF_SPAN_MAX"])

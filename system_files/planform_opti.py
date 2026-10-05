@@ -662,6 +662,9 @@ def main(argv=None):
     args = parse_args(argv)
     interactive = not args.yes
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # Record the config this study runs with, so the plotters draw the same aircraft.
+    with open(os.path.join(OUTPUT_DIR, "run_config.json"), "w", encoding="utf-8") as f:
+        json.dump(CFG, f, indent=2)
 
     import openvsp as vsp
     print("VSP Version: " + str(vsp.GetVSPVersion()))
