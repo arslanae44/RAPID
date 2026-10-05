@@ -51,7 +51,25 @@ def install_python_api(target_dir):
         return False
     print("[*] Installing the OpenVSP Python API: " + ", ".join(os.path.basename(p) for p in pkgs))
     r = subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *pkgs])
-    return r.returncode == 0
+    if r.returncode != 0:
+        return False
+    copy_compiled_extensions(os.path.join(py_dir, "openvsp", "openvsp"))
+    return True
+
+
+def copy_compiled_extensions(src_pkg):
+    """OpenVSP's MANIFEST.in lists _vsp.so / _vsp_g.so (Linux names), so on Windows
+    pip installs the package WITHOUT _vsp.pyd / _vsp_g.pyd. Copy them in."""
+    import shutil
+    code = "import importlib.util; print(importlib.util.find_spec('openvsp').submodule_search_locations[0])"
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)   # locate without importing
+    if r.returncode != 0 or not os.path.isdir(src_pkg):
+        return
+    dst_pkg = r.stdout.strip()
+    for fn in os.listdir(src_pkg):
+        if fn.lower().endswith((".pyd", ".dll", ".so")) and not os.path.exists(os.path.join(dst_pkg, fn)):
+            shutil.copy2(os.path.join(src_pkg, fn), os.path.join(dst_pkg, fn))
+            print("    [+] added missing compiled module " + fn)
 
 
 def ensure_python_api(target_dir, py):
