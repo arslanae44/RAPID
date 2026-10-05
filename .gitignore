@@ -35,6 +35,7 @@ PLOTS/*
 *.out
 *.history
 *.png
+!docs/*.png
 *.des
 *.vspgeom
 *.vkey

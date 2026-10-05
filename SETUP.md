@@ -1,78 +1,90 @@
 # Setup
 
-RAPID relies on three external binaries that are **not** stored in this repository
-(they are large and platform-specific): the Python runtime, the OpenVSP/VSPAERO
-engine, and the XFOIL solver. This guide gets a fresh clone running on Windows.
+RAPID relies on three external pieces that are **not** stored in this repository
+(they are large and platform-specific): a Python 3.13/3.11 environment, the
+OpenVSP/VSPAERO engine, and the XFOIL solver. This guide gets a fresh clone
+running on **Windows** (the solvers are Windows binaries).
 
 ## Quick start (one click)
-Run **`SETUP.bat`** from the project root. It installs the Python dependencies
-and downloads OpenVSP, XFOIL, and (optionally) the full airfoil database in one
-go. The manual steps below are the same thing, broken out.
+Run **`SETUP.bat`** from the project root. It:
+
+1. finds 64-bit **Python 3.13** (or 3.11) through the `py` launcher, and offers to
+   install Python 3.13 for your user with `winget` if neither is present;
+2. creates `.venv` and installs `requirements.txt`;
+3. downloads **OpenVSP 3.47.0** (the build matching your Python) and installs its
+   `openvsp` Python module into `.venv`;
+4. downloads **XFOIL 6.99** and the full **UIUC** airfoil set (~1650 profiles);
+5. runs `system_files\check_install.py` and prints PASS/FAIL per component.
+
+`SETUP.bat /unattended` does the same without prompts or a final pause
+(useful for scripted installs).
+
+> **Why only 3.13 / 3.11?** OpenVSP 3.47.0 win64 ships its compiled `openvsp`
+> module only for those two Python versions. **Python 3.12 and 3.14 will not work.**
+> Other Pythons may stay installed; SETUP picks the right one via `py -3.13`.
+
+## Verify an install at any time
+```
+.\.venv\Scripts\python system_files\check_install.py --solve
+```
+`--solve` also evaluates one wing with VSPAERO and one airfoil with XFOIL, using
+the built-in defaults (your `rapid_config.json` is not touched).
 
 ---
 
-## 1. Python + dependencies
-Install **Python 3.13 or 3.11** (64-bit) - OpenVSP 3.47.0 win64 is only built for
-these two versions, and the `openvsp` module must match your interpreter. Then:
+## Manual steps (what SETUP.bat does)
 
+### 1. Python + dependencies
 ```
-pip install -r requirements.txt
-```
-
-The launchers (`RUN_*.bat`, `CONFIGURE.bat`) automatically use the bundled
-`system_files\python_runtime\python.exe` if it exists; otherwise they fall back
-to the `python` on your PATH.
-
-## 2. OpenVSP 3.47.0
-Run the helper (also called by `SETUP.bat`):
-
-```
-python system_files\download_openvsp.py
+py -3.13 -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
 ```
 
-It fetches and extracts the build to `system_files\OpenVSP-3.47.0-win64\`. If the
-automatic download fails, grab the **OpenVSP 3.47.0 win64** zip from
-<https://openvsp.org/download.php> and extract it there manually.
-
-This package provides the `vsp.exe` / `vspaero.exe` solvers **and** the `openvsp`
-Python module the optimizer imports. That module is a compiled extension, so it
-must match your Python version — if `import openvsp` fails, install the wheel
-from `OpenVSP-3.47.0-win64\python\` for your Python, or run RAPID with the Python
-interpreter shipped inside the OpenVSP package.
-
-## 3. XFOIL + airfoil database
-From the project root:
-
+### 2. OpenVSP 3.47.0
 ```
-python system_files\download_xfoil.py       # fetches XFOIL 6.99 into system_files\xfoil\
-python system_files\download_airfoils.py     # fetches the full UIUC set (~1650 airfoils)
+.\.venv\Scripts\python system_files\download_openvsp.py
 ```
+It downloads `OpenVSP-3.47.0-win64-Python3.13.zip` (or `-Python3.11`) from
+<https://openvsp.org/download_old.php>, extracts it to
+`system_files\OpenVSP-3.47.0-win64\` and pip-installs the bundled
+`openvsp_config`, `degen_geom` and `openvsp` packages from its `python\` folder.
 
-The curated `airfoil_database\Low_Re | Medium_Re | High_Re | Reflexed` catalogs
-ship with the repo, but the full UIUC set is recommended: the airfoil
-co-optimization can sweep the entire database for the best section per station.
-
-## 4. Run
+### 3. XFOIL + airfoil database
 ```
-CONFIGURE.bat            # set constraints / bounds / flight conditions
+.\.venv\Scripts\python system_files\download_xfoil.py
+.\.venv\Scripts\python system_files\download_airfoils.py
+```
+The curated `airfoil_database\Low_Re | Medium_Re | High_Re | Reflexed`
+catalogs ship with the repo; the full UIUC set is recommended for the airfoil
+co-optimization ("UIUC_All" in the catalog menu).
+
+### 4. Run
+```
+CONFIGURE.bat            # constraints / bounds / flight / geometry / mesh
 RUN_OPTIMIZATION.bat     # conventional wing study
 RUN_BWB.bat              # blended-wing-body / tailless study
+RUN_AIRFOIL.bat          # airfoil optimization for a saved .vsp3 wing
+RUN_PLOTTER.bat          # Pareto + planform dashboard
 ```
+Launchers use `system_files\python_runtime\python.exe` if present, else `.venv`,
+else `python` on PATH.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `import openvsp` fails (`DLL load failed`, `No module named openvsp`) | Python version mismatch. Check `.\.venv\Scripts\python --version` is 3.13/3.11, then `.\.venv\Scripts\python -m pip install system_files\OpenVSP-3.47.0-win64\python\openvsp_config system_files\OpenVSP-3.47.0-win64\python\degen_geom system_files\OpenVSP-3.47.0-win64\python\openvsp` |
+| OpenVSP download fails | Download the **3.47.0 win64 Python 3.13** zip manually from <https://openvsp.org/download_old.php> and extract it so `vsp.exe` sits in `system_files\OpenVSP-3.47.0-win64\`. Re-run SETUP.bat. |
+| Every wing is `REJECTED: worker failed ...` | The message shows the worker's error. Open `wing_models\<wing>\<wing>.vspaero.log` for VSPAERO's own output. |
+| The run prints "Only 0.0% of the design space passes the geometry limits" | Your bounds/`S_REF` do not fit the geometry limits. Set `FUSELAGE_Y`, `C_ROOT_MIN/MAX` in CONFIGURE.bat → [GEOMETRY] for your aircraft's size. |
+| Phase 2 says "No feasible profile converged" | The catalog is too small for the Cm floor / thickness screen. Use `UIUC_All`, or relax `airfoil.CM_MIN` / `MIN_TC_*`. |
 
 ---
 
 ## Maintainer note — trimming binaries from git history
 The initial commits embedded `python_runtime/` and `OpenVSP-3.47.0-win64/`.
-`.gitignore` now excludes them, but they remain in the existing history. To
-untrack them for future commits (files stay on disk):
-
-```
-del .git\index.lock                                   & rem if a stale lock exists
-git rm -r --cached system_files\python_runtime system_files\OpenVSP-3.47.0-win64 system_files\test_debug.py
-git rm --cached system_files\altc130mod.adb.cases system_files\altc130mod.case.*.dat system_files\altc130mod.csf system_files\altc130mod.cuts system_files\altc130mod.group.* system_files\altc130mod.lod system_files\altc130mod.polar system_files\altc130mod.quad.cases system_files\altc130mod.slc system_files\altc130mod.vkey system_files\altc130mod.vspgeom
-git commit -m "Exclude portable binaries and run artifacts from tracking"
-```
-
-To also purge them from past history (smaller clones), use
-[`git filter-repo`](https://github.com/newren/git-filter-repo) or start a fresh
-history — both rewrite commits, so coordinate before pushing.
+`.gitignore` excludes them now, but they remain in the history (~188 MB). To purge
+them (smaller clones), use [`git filter-repo`](https://github.com/newren/git-filter-repo)
+or start a fresh history. Both rewrite commits, so coordinate before force-pushing.

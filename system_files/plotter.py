@@ -1,4 +1,10 @@
-import os, json, glob
+import os, json, glob, sys
+
+# Console may not be UTF-8 (redirected output, plain cmd): never crash on the status glyphs.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
@@ -24,7 +30,6 @@ def get_incremental_save_path():
 
 # ─── GEOMETRY PARAMETERS ──────────────────────────────────────────────────────
 # Read from the active config so the plots match the optimized aircraft.
-import sys
 sys.path.insert(0, SCRIPT_DIR)
 from rapid_config import load_effective_config
 _CFG = load_effective_config()
