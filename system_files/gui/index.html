@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAPID</title>
+<style>
+  :root { --bg:#fff; --fg:#1b1b1f; --mut:#6b6b76; --line:#e4e4ea; --acc:#2f5fd0; --card:#f7f7fa; --bad:#c62828; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16161a; --fg:#e8e8ee; --mut:#9a9aa6; --line:#2c2c34; --acc:#7aa2ff; --card:#1e1e24; --bad:#ff6b6b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui,Segoe UI,sans-serif; }
+  header { display:flex; align-items:center; gap:24px; padding:12px 24px; border-bottom:1px solid var(--line); }
+  header b { font-size:16px; letter-spacing:.5px; }
+  nav button { background:none; border:0; color:var(--mut); font:inherit; padding:6px 10px; cursor:pointer; border-bottom:2px solid transparent; }
+  nav button.on { color:var(--fg); border-color:var(--acc); }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:24px; padding:24px; max-width:1300px; margin:0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  h3 { margin:18px 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.8px; color:var(--mut); }
+  h3:first-child { margin-top:0; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:3px 0; }
+  .row label { color:var(--mut); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  input[type=text], input[type=number], select { width:130px; padding:4px 6px; background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px; font:inherit; }
+  input[type=checkbox] { accent-color: var(--acc); }
+  .bar { display:flex; gap:8px; margin:0 0 16px; align-items:center; flex-wrap:wrap; }
+  button.b { padding:7px 16px; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:4px; font:inherit; cursor:pointer; }
+  button.b.go { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.b.stop { color:var(--bad); }
+  button.b:disabled { opacity:.45; cursor:default; }
+  #status { color:var(--mut); margin-left:auto; }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:4px; padding:10px; height:220px; overflow:auto; margin:0 0 16px; font:12px/1.4 ui-monospace,Consolas,monospace; white-space:pre-wrap; }
+  table { border-collapse:collapse; width:100%; font-size:13px; margin:8px 0 16px; }
+  th, td { text-align:right; padding:4px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--mut); font-weight:500; position:sticky; top:0; background:var(--bg); }
+  .tw { max-height:300px; overflow:auto; }
+  img { max-width:100%; border:1px solid var(--line); border-radius:4px; margin:0 0 12px; }
+  details { margin-top:8px; }
+  summary { cursor:pointer; color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.8px; }
+</style>
+</head>
+<body>
+<header>
+  <b>RAPID</b>
+  <nav id="nav"></nav>
+</header>
+<main>
+  <section id="form"></section>
+  <section>
+    <div class="bar" id="bar"></div>
+    <pre id="log"></pre>
+    <div id="res"></div>
+  </section>
+</main>
+<script>
+const TOKEN = "__TOKEN__";
+const MODES = [["transonic","Transonic"],["conventional","Conventional"],["bwb","BWB"],["airfoil","Airfoil"],["check","Check"]];
+const OPTS = {
+  transonic:    [["pop","Population",40],["gens","Generations",30],["cores","Cores (blank = all)",""],["seed","Seed",1],
+                 ["select","Pick from front",["range","drag","weight","weighted"]],["fresh","Fresh start",false],["no_tc","Fix t/c",false]],
+  conventional: [["pop","Population",32],["gens","Generations",20],["cores","Cores (blank = all)",""],["fresh","Fresh start",false],["airfoil","Airfoil co-opt after",false]],
+  bwb:          [["pop","Population",32],["gens","Generations",20],["cores","Cores (blank = all)",""],["fresh","Fresh start",false],["airfoil","Airfoil co-opt after",false]],
+  airfoil:      [["vsp3",".vsp3 wing","system_files/presets/example_transport_wing.vsp3"],["n_sections","Stations",5],
+                 ["catalog","Catalog",["Low_Re","Medium_Re","High_Re","UIUC_All","Reflexed"]],["cores","Cores (blank = all)",""],["refine","Refine shape",false]],
+  check:        [],
+};
+let mode = "transonic", cfg = {}, opts = {}, offset = 0, polling = null;
+const $ = id => document.getElementById(id);
+
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) k === "onclick" || k === "onchange" ? e[k] = v : e.setAttribute(k, v);
+  kids.forEach(c => e.append(c));
+  return e;
+}
+
+function field(label, value, set) {
+  let inp;
+  if (typeof value === "boolean") { inp = el("input", {type:"checkbox"}); inp.checked = value; inp.onchange = () => set(inp.checked); }
+  else if (typeof value === "number") { inp = el("input", {type:"number", step:"any", value}); inp.onchange = () => set(parseFloat(inp.value)); }
+  else if (Array.isArray(value)) { inp = el("input", {type:"text", value:JSON.stringify(value)}); inp.onchange = () => { try { set(JSON.parse(inp.value)); inp.style.color=""; } catch(e) { inp.style.color="red"; } }; }
+  else { inp = el("input", {type:"text", value: value ?? ""}); inp.onchange = () => set(inp.value === "" && value === null ? null : inp.value); }
+  return el("div", {class:"row"}, el("label", {title:label}, label), inp);
+}
+
+function renderConfig(obj, host, path = []) {
+  for (const [k, v] of Object.entries(obj)) {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const d = el("details", path.length ? {} : {open: ""}, el("summary", {}, [...path, k].join(" / ")));
+      renderConfig(v, d, [...path, k]); host.append(d);
+    } else host.append(field(k, v, nv => { obj[k] = nv; }));
+  }
+}
+
+function render() {
+  const nav = $("nav"); nav.innerHTML = "";
+  MODES.forEach(([m, name]) => nav.append(el("button", {class: m === mode ? "on" : "", onclick: () => setMode(m)}, name)));
+  const f = $("form"); f.innerHTML = "";
+  f.append(el("h3", {}, "Run"));
+  for (const [k, label, def] of OPTS[mode]) {
+    if (Array.isArray(def)) {
+      const s = el("select", {onchange: () => opts[k] = s.value}); def.forEach(o => s.append(el("option", {}, o))); s.value = opts[k];
+      f.append(el("div", {class:"row"}, el("label", {}, label), s));
+    } else f.append(field(label, opts[k], nv => opts[k] = nv));
+  }
+  if (Object.keys(cfg).length) { f.append(el("h3", {}, "Parameters")); renderConfig(cfg, f); }
+  const bar = $("bar"); bar.innerHTML = "";
+  const go = el("button", {class:"b go", id:"go", onclick: () => run("run")}, mode === "check" ? "Run check" : "Run");
+  bar.append(go);
+  if (mode === "transonic") bar.append(el("button", {class:"b", id:"rep", onclick: () => run("report")}, "Rebuild report"));
+  if (mode === "conventional" || mode === "bwb") bar.append(el("button", {class:"b", id:"plot", onclick: () => run("plot")}, "Make plot"));
+  bar.append(el("button", {class:"b stop", id:"stop", onclick: stop}, "Stop"), el("span", {id:"status"}, ""));
+}
+
+async function setMode(m) {
+  mode = m;
+  cfg = await (await fetch("/api/config?mode=" + m)).json();
+  opts = {}; for (const [k, , def] of OPTS[m]) opts[k] = Array.isArray(def) ? def[0] : def;
+  render(); showResults();
+}
+
+async function post(url, body) {
+  return (await fetch(url, {method:"POST", headers:{"X-Token":TOKEN, "Content-Type":"application/json"}, body:JSON.stringify(body)})).json();
+}
+
+async function run(action) {
+  const r = await post("/api/run", {mode, action, options:opts, config:cfg});
+  if (r.error) { alert(r.error); return; }
+  offset = 0; $("log").textContent = ""; poll();
+}
+const stop = () => post("/api/stop", {});
+
+function poll() {
+  clearInterval(polling);
+  polling = setInterval(async () => {
+    const r = await (await fetch("/api/log?offset=" + offset)).json();
+    offset = r.offset;
+    const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+    if (r.text) { log.textContent += r.text; if (atEnd) log.scrollTop = log.scrollHeight; }
+    const st = $("status"), go = $("go");
+    if (st) st.textContent = r.running ? `${r.label} · ${r.secs}s` : (r.code === null ? "idle" : r.code === 0 ? "finished" : "stopped / failed (exit " + r.code + ")");
+    ["go","rep","plot"].forEach(i => { if ($(i)) $(i).disabled = r.running; });
+    if (!r.running) { clearInterval(polling); showResults(); }
+  }, 1000);
+}
+
+async function showResults() {
+  const r = await (await fetch("/api/results?mode=" + mode)).json(), host = $("res"); host.innerHTML = "";
+  r.images.forEach(u => host.append(el("img", {src: u + "&t=" + Date.now()})));
+  if (r.table && r.table.rows.length) {
+    const t = el("table"), h = el("tr");
+    r.table.columns.forEach(c => h.append(el("th", {}, c))); t.append(h);
+    r.table.rows.forEach(row => { const tr = el("tr"); row.forEach(v => tr.append(el("td", {}, String(v)))); t.append(tr); });
+    host.append(el("div", {class:"tw"}, t));
+  }
+}
+
+setMode("transonic"); poll();
+</script>
+</body>
+</html>

@@ -21,6 +21,7 @@ An NSGA-II and NASA OpenVSP-based optimization tool for aircraft wing planform g
 * **`RUN_BWB.bat`**: Launches the optimizer in **BWB / tailless mode** using the ready `system_files/bwb_config.json` preset (static-margin stability + reflexed airfoils).
 * **`RUN_PLOTTER.bat`**: Launches the standard visualization dashboard (Pareto front & wing geometries).
 * **`RUN_PERFORMANCE_PLOTTER.bat`**: Launches the advanced interactive performance mapping dashboard (Range vs. Endurance).
+* **`RUN_GUI.bat`**: Minimal local GUI (opens in your browser, no extra packages): run, stop and inspect the Transonic, Conventional, BWB and Airfoil studies, with every config parameter editable.
 * **`RUN_TRANSONIC.bat`**: Transonic planform optimization (wave drag, wing weight, stall, pitch-up, fuel) for the Navy trainer cruise point.
 * **`RUN_AIRFOIL.bat`**: Standalone airfoil optimization for any saved OpenVSP wing (`system_files/airfoil_config.json` points to the `.vsp3`).
 * **`wing_models/`**: Holds generated wing models, aerodynamic solver logs, and the checkpoint file for pausing/resuming.
