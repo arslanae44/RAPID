@@ -15,6 +15,8 @@
   nav button.on { color:var(--fg); border-color:var(--acc); }
   main { display:grid; grid-template-columns: 340px 1fr; gap:24px; padding:24px; max-width:1300px; margin:0 auto; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  #form { position:sticky; top:12px; align-self:start; max-height:calc(100vh - 24px); overflow:auto; padding-right:8px; }
+  @media (max-width: 900px) { #form { position:static; max-height:none; } }
   h3 { margin:18px 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.8px; color:var(--mut); }
   h3:first-child { margin-top:0; }
   .row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:3px 0; }
@@ -27,13 +29,27 @@
   button.b.stop { color:var(--bad); }
   button.b:disabled { opacity:.45; cursor:default; }
   #status { color:var(--mut); margin-left:auto; }
-  pre { background:var(--card); border:1px solid var(--line); border-radius:4px; padding:10px; height:220px; overflow:auto; margin:0 0 16px; font:12px/1.4 ui-monospace,Consolas,monospace; white-space:pre-wrap; }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:4px; padding:10px; height:130px; overflow:auto; margin:0 0 16px; font:12px/1.4 ui-monospace,Consolas,monospace; white-space:pre-wrap; }
   table { border-collapse:collapse; width:100%; font-size:13px; margin:8px 0 16px; }
   th, td { text-align:right; padding:4px 8px; border-bottom:1px solid var(--line); }
   th { color:var(--mut); font-weight:500; position:sticky; top:0; background:var(--bg); }
   .tw { max-height:300px; overflow:auto; }
   img { max-width:100%; border:1px solid var(--line); border-radius:4px; margin:0 0 12px; }
   details { margin-top:8px; }
+  .hint { color:var(--mut); font-size:13px; margin:0 0 8px; max-width:720px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:10px; margin:12px 0 16px; }
+  .card { border:1px solid var(--line); border-radius:6px; padding:6px 8px; background:var(--card); }
+  .card.hl { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
+  .card b { font-size:12px; }
+  .card small { display:block; color:var(--mut); font-size:11px; line-height:1.35; }
+  .card svg { width:100%; height:74px; display:block; margin:2px 0; }
+  .card .plan { fill:var(--acc); fill-opacity:.35; stroke:var(--acc); stroke-width:1; vector-effect:non-scaling-stroke; }
+  .card .plan.chosen { fill:#e0a800; fill-opacity:.45; stroke:#e0a800; }
+  .card .plan.chart { fill:var(--bad); fill-opacity:.3; stroke:var(--bad); }
+  .pareto text { fill:var(--mut); font-size:11px; }
+  .pareto .num { fill:var(--fg); font-size:10px; }
+  .pareto .ax { stroke:var(--line); }
+  .pareto circle { cursor:pointer; }
   summary { cursor:pointer; color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.8px; }
 </style>
 </head>
@@ -107,7 +123,8 @@ function render() {
   bar.append(go);
   if (mode === "transonic") bar.append(el("button", {class:"b", id:"rep", onclick: () => run("report")}, "Rebuild report"));
   if (mode === "conventional" || mode === "bwb") bar.append(el("button", {class:"b", id:"plot", onclick: () => run("plot")}, "Make plot"));
-  bar.append(el("button", {class:"b stop", id:"stop", onclick: stop}, "Stop"), el("span", {id:"status"}, ""));
+  bar.append(el("button", {class:"b stop", id:"stop", onclick: stop}, "Stop"),
+             el("button", {class:"b", id:"reset", onclick: resetMode}, "Reset"), el("span", {id:"status"}, ""));
 }
 
 async function setMode(m) {
@@ -128,6 +145,14 @@ async function run(action) {
 }
 const stop = () => post("/api/stop", {});
 
+async function resetMode() {
+  if (!confirm("Reset " + mode + "?\n\nThis deletes the saved results and checkpoint of this mode and restores the default parameters.")) return;
+  const r = await post("/api/reset", {mode});
+  if (r.error) { alert(r.error); return; }
+  $("log").textContent = ""; offset = 0;
+  await setMode(mode);
+}
+
 function poll() {
   clearInterval(polling);
   polling = setInterval(async () => {
@@ -137,20 +162,80 @@ function poll() {
     if (r.text) { log.textContent += r.text; if (atEnd) log.scrollTop = log.scrollHeight; }
     const st = $("status"), go = $("go");
     if (st) st.textContent = r.running ? `${r.label} · ${r.secs}s` : (r.code === null ? "idle" : r.code === 0 ? "finished" : "stopped / failed (exit " + r.code + ")");
-    ["go","rep","plot"].forEach(i => { if ($(i)) $(i).disabled = r.running; });
+    ["go","rep","plot","reset"].forEach(i => { if ($(i)) $(i).disabled = r.running; });
     if (!r.running) { clearInterval(polling); showResults(); }
   }, 1000);
 }
 
+const NS = "http://www.w3.org/2000/svg";
+function sv(tag, attrs = {}, ...kids) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  kids.forEach(c => e.append(c));
+  return e;
+}
+const niceTicks = (lo, hi, n = 5) => Array.from({length: n}, (_, i) => lo + (hi - lo) * i / (n - 1));
+
+function planform(poly, cls, ext) {
+  const mir = poly.slice().reverse().map(([y, x]) => [-y, x]);
+  const d = poly.concat(mir).map(([y, x]) => y.toFixed(3) + "," + x.toFixed(3)).join(" ");
+  const svg = sv("svg", {viewBox: `${-ext.y * 1.05} ${-ext.x * 0.05} ${ext.y * 2.1} ${ext.x * 1.1}`, preserveAspectRatio: "xMidYMid meet"});
+  svg.append(sv("polygon", {points: d, class: "plan " + cls}));
+  return svg;
+}
+
+function paretoView(P, host) {
+  host.append(el("p", {class: "hint"}, P.hint));
+  const W = 660, H = 340, m = {l: 64, r: 18, t: 12, b: 46}, pts = P.points;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const pad = (lo, hi) => { const d = (hi - lo || 1) * 0.08; return [lo - d, hi + d]; };
+  const [x0, x1] = pad(Math.min(...xs), Math.max(...xs)), [y0, y1] = pad(Math.min(...ys), Math.max(...ys));
+  const X = v => m.l + (v - x0) / (x1 - x0) * (W - m.l - m.r), Y = v => H - m.b - (v - y0) / (y1 - y0) * (H - m.t - m.b);
+  const svg = sv("svg", {viewBox: `0 0 ${W} ${H}`, class: "pareto", style: "width:100%;max-width:720px;display:block"});
+  niceTicks(x0, x1).forEach(v => svg.append(sv("line", {x1: X(v), x2: X(v), y1: m.t, y2: H - m.b, class: "ax"}),
+    sv("text", {x: X(v), y: H - m.b + 15, "text-anchor": "middle"}, v.toFixed(Math.abs(x1 - x0) < 2 ? 2 : 0))));
+  niceTicks(y0, y1).forEach(v => svg.append(sv("line", {x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), class: "ax"}),
+    sv("text", {x: m.l - 6, y: Y(v) + 3, "text-anchor": "end"}, v.toFixed(Math.abs(y1 - y0) < 20 ? 1 : 0))));
+  svg.append(sv("text", {x: (m.l + W - m.r) / 2, y: H - 6, "text-anchor": "middle"}, P.xlabel));
+  svg.append(sv("text", {transform: `translate(14 ${(m.t + H - m.b) / 2}) rotate(-90)`, "text-anchor": "middle"}, P.ylabel));
+  const front = pts.filter(p => p.tag !== "chart");
+  svg.append(sv("polyline", {points: front.map(p => X(p.x) + "," + Y(p.y)).join(" "), fill: "none", stroke: "var(--line)", "stroke-width": 1.5}));
+  const ext = {x: 0, y: 0};
+  pts.forEach(p => p.poly.forEach(([y, x]) => { ext.y = Math.max(ext.y, y); ext.x = Math.max(ext.x, x); }));
+  const cards = el("div", {class: "cards"}), dots = [], cardEls = [];
+  const hl = (i, on) => { dots[i].setAttribute("r", on ? 9 : (pts[i].tag ? 7 : 5)); cardEls[i].classList.toggle("hl", on); };
+  const order = pts.map((p, i) => i).sort((a, b) => (pts[a].tag === "chart") - (pts[b].tag === "chart"));
+  let n = 0;
+  order.forEach(i => {
+    const p = pts[i], label = p.tag === "chart" ? "chart" : String(++n);
+    const col = p.tag === "chosen" ? "#e0a800" : p.tag === "chart" ? "var(--bad)" : "var(--acc)";
+    const c = sv("circle", {cx: X(p.x), cy: Y(p.y), r: p.tag ? 7 : 5, fill: col, "fill-opacity": .85, stroke: "var(--bg)", "stroke-width": 1.5});
+    c.onmouseenter = () => hl(i, true); c.onmouseleave = () => hl(i, false);
+    dots[i] = c; svg.append(c);
+    if (p.tag !== "chart") svg.append(sv("text", {x: X(p.x) + 8, y: Y(p.y) - 6, class: "num"}, label));
+    const title = p.tag === "chart" ? "Chart wing" : (p.tag === "chosen" ? "★ #" + label + " (chosen)" : "#" + label);
+    const card = el("div", {class: "card"}, el("b", {}, title));
+    card.append(planform(p.poly, p.tag, ext));
+    p.lines.forEach(l => card.append(el("small", {}, l)));
+    card.onmouseenter = () => hl(i, true); card.onmouseleave = () => hl(i, false);
+    cardEls[i] = card; cards.append(card);
+  });
+  host.append(svg, cards);
+}
+
 async function showResults() {
   const r = await (await fetch("/api/results?mode=" + mode)).json(), host = $("res"); host.innerHTML = "";
-  r.images.forEach(u => host.append(el("img", {src: u + "&t=" + Date.now()})));
+  if (r.pareto && r.pareto.points.length) paretoView(r.pareto, host);
+  const more = el("details", {}, el("summary", {}, "More plots and table"));
+  r.images.forEach(u => { if (!(r.pareto && u.includes("pareto.png"))) more.append(el("img", {src: u + "&t=" + Date.now()})); });
   if (r.table && r.table.rows.length) {
     const t = el("table"), h = el("tr");
     r.table.columns.forEach(c => h.append(el("th", {}, c))); t.append(h);
     r.table.rows.forEach(row => { const tr = el("tr"); row.forEach(v => tr.append(el("td", {}, String(v)))); t.append(tr); });
-    host.append(el("div", {class:"tw"}, t));
+    more.append(el("div", {class: "tw"}, t));
   }
+  if (more.children.length > 1) host.append(more);
+  if (!host.children.length) host.append(el("p", {class: "hint"}, "No results yet. Press Run."));
 }
 
 setMode("transonic"); poll();

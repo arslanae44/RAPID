@@ -13,8 +13,10 @@ import argparse
 import copy
 import glob
 import json
+import math
 import mimetypes
 import os
+import shutil
 import secrets
 import subprocess
 import sys
@@ -146,6 +148,90 @@ def read_log(offset):
         return "", 0
 
 
+# ─── PARETO CARDS ────────────────────────────────────────────────────────────
+def poly_trapezoid(b, cr, ct, sweep_le):
+    """Right half-wing outline as [y, x] points (x aft of the root leading edge)."""
+    t, y = math.tan(math.radians(sweep_le)), b / 2.0
+    return [[0, 0], [y, y * t], [y, y * t + ct], [0, cr]]
+
+
+def poly_cranked(r, cfg):
+    import geometry
+    geo = cfg["geometry"]
+    g = geometry.chord_from_geometry(r["AR"], r["kink_frac"], r["t_inner"], r["t_outer"], float(cfg["flight"]["S_REF"]), geo)
+    if g is None:
+        return None
+    c_root, c_kink, c_tip, b_half, b_kink, _ = g
+    fy = float(geo["FUSELAGE_Y"])
+    xk = b_kink * math.tan(math.radians(r["sweep_inner"]))
+    xt = xk + (b_half - b_kink) * math.tan(math.radians(r["sweep_outer"]))
+    return [[fy, 0], [fy + b_kink, xk], [fy + b_half, xt], [fy + b_half, xt + c_tip], [fy + b_kink, xk + c_kink], [fy, c_root]]
+
+
+def pareto_transonic(out):
+    rep = os.path.join(out, "report")
+    pj = os.path.join(rep, "pareto.json")
+    if not os.path.exists(pj):
+        return None
+    rows = sorted(json.load(open(pj, encoding="utf-8")), key=lambda r: r["CD"])
+    chosen = None
+    cw = os.path.join(rep, "chosen_wing.json")
+    if os.path.exists(cw):
+        chosen = json.load(open(cw, encoding="utf-8"))["design"]
+
+    def pt(r, tag=""):
+        return {"x": round(r["CD"] * 1e4, 2), "y": round(r["W_wing_lb"]), "tag": tag,
+                "poly": poly_trapezoid(r["b"], r["cr"], r["ct"], r["SWEEP_LE"]),
+                "lines": [f"{r['CD']*1e4:.1f} counts · {r['W_wing_lb']:.0f} lb", f"AR {r['AR']:.2f} · sweep {r['SWEEP_LE']:.1f}° · taper {r['TAPER']:.2f}",
+                          f"washout {r['WASHOUT']:.1f}° · M_dd {r['Mdd_min']:.3f}"]}
+    pts = []
+    for r in rows:
+        is_ch = chosen is not None and abs(r["AR"] - chosen["AR"]) < 1e-6 and abs(r["SWEEP_LE"] - chosen["SWEEP_LE"]) < 1e-6
+        pts.append(pt(r, "chosen" if is_ch else ""))
+    cj = os.path.join(rep, "chart_wing.json")
+    if os.path.exists(cj):
+        c = json.load(open(cj, encoding="utf-8"))
+        d, m = c["design"], c["metrics"]
+        pts.append(pt({"CD": m["CD"], "W_wing_lb": m["W_wing_lb"], "b": m["b"], "cr": m["cr"], "ct": m["ct"], "SWEEP_LE": d["SWEEP_LE"],
+                       "AR": d["AR"], "TAPER": d["TAPER"], "WASHOUT": d["WASHOUT"], "Mdd_min": m["Mdd_min"]}, "chart"))
+    return {"xlabel": "Cruise drag C_D (counts)  →  worse", "ylabel": "Wing weight (lb)  →  heavier",
+            "hint": "Each dot is one optimal wing: no other wing found is both lighter AND lower-drag. Lower-left is better; moving along the "
+                    "curve trades drag for weight. Numbers match the planform cards below. Gold = chosen wing, red = chart wing (dominated).",
+            "points": pts}
+
+
+def pareto_planform(mode, out):
+    pj = os.path.join(out, "pareto_results.json")
+    if not os.path.exists(pj):
+        return None
+    from rapid_config import load_effective_config
+    cp = os.path.join(out, "gui_config.json")
+    cfg = load_effective_config(cp if os.path.exists(cp) else None)
+    rows = sorted(json.load(open(pj, encoding="utf-8")), key=lambda r: r["CL"])
+    pts = []
+    for r in rows:
+        poly = poly_cranked(r, cfg)
+        if poly is None:
+            continue
+        lines = [f"CL {r['CL']:.3f} · L/D {r['LD']:.1f}", f"AR {r['AR']:.2f} · kink {r['kink_frac']:.2f} · taper {r['t_inner']:.2f}/{r['t_outer']:.2f}",
+                 f"sweep {r['sweep_inner']:.0f}°/{r['sweep_outer']:.0f}°" + (f" · SM {r['SM']*100:.0f}%" if "SM" in r else "")]
+        pts.append({"x": r["CL"], "y": r["LD"], "tag": "", "poly": poly, "lines": lines})
+    return {"xlabel": "Lift coefficient CL  →  more lift", "ylabel": "Lift-to-drag L/D  →  more efficient",
+            "hint": "Each dot is one optimal wing: no other wing found has both higher CL AND higher L/D. Upper-right is better; moving along the "
+                    "curve trades CL for L/D. Numbers match the planform cards below.", "points": pts}
+
+
+def reset(mode):
+    with LOCK:
+        if running():
+            return {"error": "stop the active run first"}
+        out = os.path.abspath(outdir(mode))
+        if not out.startswith(os.path.abspath(WM) + os.sep) or not os.path.isdir(out):
+            return {"ok": True}
+        shutil.rmtree(out, ignore_errors=True)
+        return {"ok": True}
+
+
 # ─── RESULTS ─────────────────────────────────────────────────────────────────
 def rel(p):
     return "/file?p=" + urllib.parse.quote(os.path.relpath(p, ROOT).replace("\\", "/"))
@@ -179,7 +265,8 @@ def results(mode):
         if os.path.exists(aa):
             st = json.load(open(aa, encoding="utf-8")).get("stations", [])
             table = {"columns": ["eta", "airfoil"], "rows": [[s["eta"], os.path.basename(str(s["airfoil"]))] for s in st]}
-    return {"table": table, "images": images}
+    pareto = pareto_transonic(out) if mode == "transonic" else (pareto_planform(mode, out) if mode in ("conventional", "bwb") else None)
+    return {"table": table, "images": images, "pareto": pareto}
 
 
 # ─── HTTP ────────────────────────────────────────────────────────────────────
@@ -230,6 +317,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, start(req))
         if self.path == "/api/stop":
             return self._send(200, stop())
+        if self.path == "/api/reset":
+            return self._send(200, reset(req["mode"]))
         self._send(404, {"error": "not found"})
 
 
