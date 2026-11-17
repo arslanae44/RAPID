@@ -326,7 +326,7 @@ def korn_min(r, chord_frac):
     return float(np.min(T.korn_mdd(sp["cl"], sp["tc"], sw, TC["KORN_KAPPA"])))
 
 
-def make_report(out_dir, select="range", weight=0.5, show=False):
+def make_report(out_dir, select="range", weight=0.5, show=False, tag=""):
     import matplotlib
     if not show:
         matplotlib.use("Agg")
@@ -337,7 +337,8 @@ def make_report(out_dir, select="range", weight=0.5, show=False):
     feas = [r for r in recs if r["feasible"]]
     print(f"\n[i] {len(recs)} wings solved, {len(feas)} feasible")
     if not feas:
-        os.makedirs(os.path.join(out_dir, "report"), exist_ok=True)
+        rep_dir = os.path.join(out_dir, "report" + (f"_{tag}" if tag else ""))
+        os.makedirs(rep_dir, exist_ok=True)
         best = sorted(recs, key=violation)[:10]
         lines = ["# No feasible wing", "", f"{len(recs)} wings solved; none satisfies every constraint.", "",
                  "Best attainable value of each constraint quantity among all solved wings:", ""]
@@ -351,15 +352,15 @@ def make_report(out_dir, select="range", weight=0.5, show=False):
             bad = [n for n, v in zip(T.CONSTRAINT_NAMES, r["G"]) if v > 1e-9]
             lines.append(f"| {d['AR']:.2f} | {d['SWEEP_LE']:.1f} | {d['TAPER']:.2f} | {d['WASHOUT']:.1f} | {d['TC_ROOT']:.3f} | {d['TC_TIP']:.3f} | "
                          f"{m['CD']*1e4:.1f} | {m['W_wing_lb']:.0f} | {m['Mdd_min']:.3f} | {m['stall_out_ratio']:.2f} | {', '.join(bad)} |")
-        with open(os.path.join(out_dir, "report", "infeasible.md"), "w", encoding="utf-8") as f:
+        with open(os.path.join(rep_dir, "infeasible.md"), "w", encoding="utf-8") as f:
             f.write(NL.join(lines) + NL)
         print(NL.join(lines[:12]))
         return None
     front = nondominated(feas)
     chosen = select_wing(front, chart, select, weight)
 
-    os.makedirs(os.path.join(out_dir, "report"), exist_ok=True)
-    rep = os.path.join(out_dir, "report")
+    rep = os.path.join(out_dir, "report" + (f"_{tag}" if tag else ""))
+    os.makedirs(rep, exist_ok=True)
     with open(os.path.join(rep, "pareto.json"), "w") as f:
         json.dump([row(r) for r in front], f, indent=1)
     with open(os.path.join(rep, "chosen_wing.json"), "w") as f:
@@ -497,6 +498,9 @@ def main(argv=None):
     ap.add_argument("--weight", type=float, default=0.5)
     ap.add_argument("--evaluate", help="AR,SWEEP_LE,TAPER,WASHOUT[,TC_ROOT,TC_TIP]: evaluate one wing and exit")
     ap.add_argument("--report-only", action="store_true")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="override a transonic config value (JSON), e.g. --set PITCHUP_ENABLED=false --set CLMAX_TIP=1.72")
+    ap.add_argument("--tag", default="", help="write the report to report_<tag>/ (for sensitivity runs)")
     ap.add_argument("--out")
     args = ap.parse_args(argv)
 
@@ -506,6 +510,10 @@ def main(argv=None):
         os.environ["RAPID_OUTPUT_DIR"] = OUT_DIR
     if args.no_tc:
         TC["TC_VARIABLE"] = False
+    for kv in args.set:
+        k, v = kv.split("=", 1)
+        TC[k.strip()] = json.loads(v)
+        print(f"[cfg] override {k.strip()} = {TC[k.strip()]}")
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f"[cfg] transonic: M {TC['MACH']} CL {TC['CL_TARGET']} S {TC['S_REF']} | vars "
           f"{'6 (incl. t/c)' if TC['TC_VARIABLE'] else '4'} | constraints: " + ", ".join(T.CONSTRAINT_NAMES))
@@ -529,7 +537,7 @@ def main(argv=None):
     if not args.report_only:
         evaluate_chart(OUT_DIR)
         run_optimization(args)
-    make_report(OUT_DIR, args.select, args.weight)
+    make_report(OUT_DIR, args.select, args.weight, tag=args.tag)
     return 0
 
 
