@@ -69,6 +69,7 @@ from pymoo.util.display.column import Column  # noqa: E402
 from rapid_config import load_effective_config  # noqa: E402
 import geometry  # noqa: E402
 import airfoil_opti  # noqa: E402
+import vsp_runner  # noqa: E402
 
 VSP_FILE      = os.path.join(SCRIPT_DIR, "altc130mod.vsp3")
 WORKER_SCRIPT = os.path.join(SCRIPT_DIR, "vsp_worker.py")
@@ -285,38 +286,7 @@ def _penalty():
 
 def _run_worker(run_dir, params_file, result_file, timeout):
     """Launch vsp_worker.py; returns (ok, diagnostic)."""
-    python_bin = getattr(sys, "_base_executable", sys.executable)
-    env = os.environ.copy()
-    env.update({"OMP_NUM_THREADS": "1", "PYTHONDONTWRITEBYTECODE": "1",
-                "RAPID_EXTRA_PATHS": os.pathsep.join([sysconfig.get_path("purelib"), SCRIPT_DIR])})
-    cmd = [python_bin, WORKER_SCRIPT, VSP_ROOT, run_dir, params_file, result_file]
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    diag = ""
-    for attempt in range(3):
-        if launch_lock is not None:
-            launch_lock.acquire()
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True, env=env, creationflags=flags)
-            time.sleep(0.25)   # serialize DLL loading under Windows scanners
-        finally:
-            if launch_lock is not None:
-                launch_lock.release()
-        try:
-            out, err = proc.communicate(timeout=timeout + 60)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return False, "worker timed out"
-        if os.path.exists(result_file):
-            return True, ""
-        diag = (err or out or "").strip()[-600:]
-        lowered = diag.lower()
-        if "being used by another process" in lowered or "access is denied" in lowered or not diag:
-            time.sleep(0.5 + random.random() * 1.5)   # transient lock: retry
-            continue
-        break
-    return False, diag or "worker exited without a result"
+    return vsp_runner.run_worker(run_dir, params_file, result_file, timeout, lock=launch_lock)
 
 
 def evaluate_subprocess(x, wake_iterations=None):

@@ -149,8 +149,10 @@ def write_vspaero_inputs(vsp3_path):
     vsp.SetDoubleAnalysisInput(sw, "bref", [float(p["b_ref"])])
     vsp.SetDoubleAnalysisInput(sw, "cref", [float(p["c_ref"])])
     vsp.SetDoubleAnalysisInput(sw, "Xcg",  [float(p["x_cg"])])
-    vsp.SetDoubleAnalysisInput(sw, "MachStart", [float(p["mach"])])
-    vsp.SetIntAnalysisInput(sw, "MachNpts", [1])
+    machs = [float(m) for m in (p.get("machs") or [p["mach"]])]   # e.g. [0.15, 0.75]: one run, both flight states
+    vsp.SetDoubleAnalysisInput(sw, "MachStart", [machs[0]])
+    vsp.SetDoubleAnalysisInput(sw, "MachEnd", [machs[-1]])
+    vsp.SetIntAnalysisInput(sw, "MachNpts", [len(machs)])
     vsp.SetDoubleAnalysisInput(sw, "AlphaStart", [alphas[0]])
     vsp.SetDoubleAnalysisInput(sw, "AlphaEnd",   [alphas[-1]])
     vsp.SetIntAnalysisInput(sw, "AlphaNpts", [len(alphas)])
@@ -188,11 +190,47 @@ def parse_polar(polar_file):
         cl = d.get("CLwtot", d.get("CLtot", d.get("CL", 0.0)))
         cd = d.get("CDwtot", d.get("CDtot", d.get("CD", 0.0)))
         cm = d.get("CMytot", d.get("CMiy", d.get("CMy", 0.0)))
-        rows.append({"alpha": d.get("AoA"), "CL": cl, "CD": cd, "CM": cm,
-                     "LD": (cl / cd) if cd else 0.0})
+        rows.append({"alpha": d.get("AoA"), "mach": d.get("Mach"), "CL": cl, "CD": cd, "CM": cm,
+                     "LD": (cl / cd) if cd else 0.0,
+                     "CDi": d.get("CDiw", d.get("CDi")),     # Trefftz-plane induced drag
+                     "CDo": d.get("CDo")})                   # VSPAERO's own friction estimate
     if not rows:
         raise ValueError("No numeric polar rows parsed")
     return rows
+
+
+def parse_lod(path):
+    """Spanwise strip loads from <name>.lod, one entry per (Mach, alpha) case.
+
+    Right half-wing only (Yavg > 0), sorted root -> tip. cl is the strip lift
+    coefficient on the local chord and freestream dynamic pressure.
+    """
+    cases, cur, headers = [], None, None
+    with open(path, "r") as f:
+        for ln in f:
+            s = ln.strip()
+            if s.startswith("Mach_"):
+                cur = {"mach": float(s.split()[1]), "alpha": None, "rows": []}
+                cases.append(cur)
+            elif s.startswith("AoA_") and cur is not None:
+                cur["alpha"] = float(s.split()[1])
+            elif s.startswith("Iter"):
+                headers = s.split()
+            elif headers and cur is not None and s and (s[0].isdigit() or s[0] == "-"):
+                parts = s.split()
+                if len(parts) == len(headers):
+                    try:
+                        cur["rows"].append(dict(zip(headers, (float(v) for v in parts))))
+                    except ValueError:
+                        pass
+    out = []
+    for c in cases:
+        rows = sorted((r for r in c["rows"] if r["Yavg"] > 0), key=lambda r: r["Yavg"])
+        if rows:
+            out.append({"mach": c["mach"], "alpha": c["alpha"],
+                        "y": [r["Yavg"] for r in rows], "chord": [r["Chord"] for r in rows],
+                        "dA": [r["dArea"] for r in rows], "cl": [r["Cl"] for r in rows]})
+    return out
 
 
 def main():
@@ -216,8 +254,14 @@ def main():
 if __name__ == "__main__":
     try:
         rows = main()
+        extra = {}
+        if p.get("strips"):
+            lod = f"{name}.lod"
+            if not os.path.exists(lod):
+                raise RuntimeError(f"VSPAERO did not write {lod} (see {name}.vspaero.log)")
+            extra["strips"] = parse_lod(lod)
         # Top-level CL/CD/LD/CM mirror the design-alpha row (read by the plotters).
-        _write_result({"rows": rows, "error": None,
+        _write_result({"rows": rows, "error": None, **extra,
                        **{k: rows[0][k] for k in ("CL", "CD", "LD", "CM")}})
     except Exception as e:  # report every failure to the parent instead of dying silently
         _write_result({"rows": [], "error": f"{type(e).__name__}: {e}", "CL": None})

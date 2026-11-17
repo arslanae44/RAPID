@@ -1,0 +1,17 @@
+{
+  "mesh": {
+    "TESS_W": 33,
+    "TESS_U": 24,
+    "WAKE_ITERS": 0,
+    "TIMEOUT_S": 240.0
+  },
+  "transonic": {
+    "MDD_MIN": 0.78,
+    "MDD_GOAL": 0.90,
+    "TC_VARIABLE": true,
+    "STALL_ETA_OUT": 0.65,
+    "STALL_MARGIN": 1.0,
+    "FUEL_SHARE_MIN": 0.5,
+    "PITCHUP_ENABLED": true
+  }
+}
