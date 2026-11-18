@@ -484,6 +484,26 @@ def make_report(out_dir, select="range", weight=0.5, show=False, tag=""):
     return {"chosen": chosen, "chart": chart, "front": front}
 
 
+# ─── AIRFOIL STAGE ───────────────────────────────────────────────────────────
+def run_airfoil_stage(chosen, cores, catalog):
+    """XFOIL airfoil search for the chosen wing at its cruise Reynolds number and trimmed angle of attack."""
+    import airfoil_opti as A
+    name = chosen["name"]
+    path = os.path.join(OUT_DIR, name, name + ".vsp3")
+    if not os.path.exists(path):
+        print(f"[!] Cannot find the chosen wing's geometry: {path}")
+        return None
+    print("\n" + "=" * 70 + "\n AIRFOIL STAGE (chosen wing)\n" + "=" * 70)
+    # Two stations (root and tip): the transonic wing is one straight-tapered panel with linear t/c
+    stations, incidence = A.stations_from_vsp3(path, None, 2)
+    st = T.cruise_state(TC)
+    fs = {"V_MS": st["V"], "RHO": float(TC["RHO"]), "MU": float(TC["MU"]), "AOA": chosen["metrics"]["alpha_trim"], "INCIDENCE": incidence}
+    sections = A.sectional_conditions(stations, fs)
+    A.print_sections(sections, f"SECTIONAL CONDITIONS (trim alpha {fs['AOA']:.2f} deg)")
+    return A.run_pipeline(sections, cores or os.cpu_count() or 4, CFG, catalog=catalog, interactive=False,
+                          refine=False, write_active=False, show_plot=False)
+
+
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 def main(argv=None):
     ap = argparse.ArgumentParser(description="RAPID transonic planform optimizer")
@@ -498,6 +518,8 @@ def main(argv=None):
     ap.add_argument("--weight", type=float, default=0.5)
     ap.add_argument("--evaluate", help="AR,SWEEP_LE,TAPER,WASHOUT[,TC_ROOT,TC_TIP]: evaluate one wing and exit")
     ap.add_argument("--report-only", action="store_true")
+    ap.add_argument("--airfoil", action="store_true", help="afterwards, search airfoils for the chosen wing (uses the 'airfoil' config section)")
+    ap.add_argument("--catalog", default="UIUC_All", help="airfoil catalog for --airfoil")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="override a transonic config value (JSON), e.g. --set PITCHUP_ENABLED=false --set CLMAX_TIP=1.72")
     ap.add_argument("--tag", default="", help="write the report to report_<tag>/ (for sensitivity runs)")
@@ -537,7 +559,9 @@ def main(argv=None):
     if not args.report_only:
         evaluate_chart(OUT_DIR)
         run_optimization(args)
-    make_report(OUT_DIR, args.select, args.weight, tag=args.tag)
+    res = make_report(OUT_DIR, args.select, args.weight, tag=args.tag)
+    if args.airfoil and res:
+        run_airfoil_stage(res["chosen"], args.cores, args.catalog)
     return 0
 
 

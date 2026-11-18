@@ -27,7 +27,7 @@ import numpy as np
 
 try:
     if hasattr(sys.stdout, "buffer") and sys.stdout.buffer and getattr(sys.stdout, "encoding", "").lower() != "utf-8":
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 except Exception:
     pass
 
@@ -54,6 +54,7 @@ def flight_state(cfg):
     return {
         "V_MS": v, "RHO": float(fl["RHO"]), "MU": float(fl["MU"]),
         "AOA": float(fl["AOA"]), "INCIDENCE": float(fl["INCIDENCE"]),
+        "WASHOUT": float(fl["INCIDENCE"]) - float(fl.get("TIP_INCIDENCE", 0.0)),
         "MACH": v / math.sqrt(1.4 * 287.05 * float(fl["TEMP_K"])),
     }
 
@@ -146,7 +147,7 @@ def sections_from_design(design, n_sections, cfg):
     fs = flight_state(cfg)
     x = [design[k] for k in ("AR", "kink_frac", "t_inner", "t_outer", "sweep_inner", "sweep_outer")]
     st = geometry.planform_stations(x, float(cfg["flight"]["S_REF"]), n_sections,
-                                    fs["INCIDENCE"], cfg.get("geometry"))
+                                    fs["WASHOUT"], cfg.get("geometry"))
     return sectional_conditions(st, fs) if st else None
 
 
@@ -258,10 +259,87 @@ def _min_tc(section, af_cfg):
     return float(af_cfg["MIN_TC_MID"])
 
 
+def _max_tc(section, af_cfg):
+    key = "MAX_TC_ROOT" if section["zone"] == "ROOT" else "MAX_TC_TIP" if section["zone"] == "TIP" else "MAX_TC_MID"
+    return float(af_cfg.get(key, 1.0))
+
+
+def _pmap(pool, fn, items, label):
+    """pool.map that prints a '[progress] done/total label' heartbeat about every 5 s (the GUI shows it as a bar)."""
+    total, out = len(items), []
+    t0 = last = time.time()
+    for i, r in enumerate(pool.imap(fn, items, chunksize=2), 1):
+        out.append(r)
+        now = time.time()
+        if now - last >= 5 or i == total:
+            print(f"[progress] {i}/{total} {label} ({now - t0:.0f}s)", flush=True)
+            last = now
+    return out
+
+
 def _score(c, bwb):
     # Conventional: pure L/D. BWB / tailless: strongly prefer near-zero /
     # slightly positive Cm (reflexed, self-trimming).
     return c["avg_ld"] - 200.0 * abs(c["avg_cm"] - 0.01) if bwb else c["avg_ld"]
+
+
+# ─── STALL CHARACTER ─────────────────────────────────────────────────────────
+STALL_ALPHAS = [float(a) for a in range(6, 25)]
+
+
+def stall_drop(polar, delta):
+    """Fraction of CLmax lost `delta` degrees past the CLmax angle.
+
+    Returns (drop, alpha_clmax, CLmax). drop is None when XFOIL has no converged
+    point that far past CLmax (an abrupt, separated stall usually looks like that)."""
+    pts = sorted((a, v["CL"]) for a, v in polar.items())
+    if len(pts) < 3:
+        return None, None, None
+    i = max(range(len(pts)), key=lambda k: pts[k][1])
+    a0, cl0 = pts[i]
+    target = a0 + delta
+    lo, hi = [q for q in pts if q[0] <= target], [q for q in pts if q[0] >= target]
+    if not hi or not lo or cl0 <= 0:
+        return None, a0, cl0
+    (a1, c1), (a2, c2) = lo[-1], hi[0]
+    cl_t = c1 if a2 == a1 else c1 + (c2 - c1) * (target - a1) / (a2 - a1)
+    return max(0.0, (cl0 - cl_t) / cl0), a0, cl0
+
+
+def _stall_worker(args):
+    from xfoil_handler import analyze_airfoil
+    path, reynolds, mach = args
+    try:
+        return analyze_airfoil(path, reynolds, mach, STALL_ALPHAS, max_iter=200, timeout=180)
+    except Exception:
+        return {}
+
+
+def apply_stall_filter(pool, candidates, section, mach, af_cfg):
+    """Run a post-stall XFOIL sweep on the best `STALL_TOPK` candidates and drop the ones that lose
+    more than STALL_DROP_MAX of CLmax within STALL_DELTA_ALPHA degrees. Returns (kept, evaluated)."""
+    top = candidates[:int(af_cfg["STALL_TOPK"])]
+    delta, dmax = float(af_cfg["STALL_DELTA_ALPHA"]), float(af_cfg["STALL_DROP_MAX"])
+    t0 = time.time()
+    # Stall happens at low speed, so the check can use its own Mach and a scaled Reynolds number
+    # (STALL_MACH_LOW, STALL_RE_FACTOR = Re at the stall / approach speed divided by the cruise Re). Defaults: same as cruise.
+    mach_s = float(af_cfg.get("STALL_MACH_LOW", mach))
+    re_s = section["Re"] * float(af_cfg.get("STALL_RE_FACTOR", 1.0))
+    polars = _pmap(pool, _stall_worker, [(c["path"], re_s, mach_s) for c in top], f"stall check, station {section['id']}")
+    kept, n_unknown, n_abrupt = [], 0, 0
+    for c, pol in zip(top, polars):
+        drop, a_cl, clmax = stall_drop(pol, delta)
+        c["stall_drop"], c["clmax"] = drop, clmax
+        c["stall_ok"] = drop is not None and drop <= dmax
+        if drop is None:
+            n_unknown += 1
+        elif drop > dmax:
+            n_abrupt += 1
+        if c["stall_ok"]:
+            kept.append(c)
+    print(f"    Stall check ({len(top)} best, drop <= {dmax:.0%} within {delta:g} deg of CLmax): {len(kept)} pass, "
+          f"{n_abrupt} too abrupt, {n_unknown} no converged post-stall point ({time.time() - t0:.0f}s)")
+    return kept, top
 
 
 def _evaluate_files(pool, files, section, mach, alphas, cm_min):
@@ -269,7 +347,7 @@ def _evaluate_files(pool, files, section, mach, alphas, cm_min):
     if not files:
         return []
     t0 = time.time()
-    results = pool.map(_parallel_xfoil_worker, [(f, section["Re"], mach, alphas, None) for f in files])
+    results = _pmap(pool, _parallel_xfoil_worker, [(f, section["Re"], mach, alphas, None) for f in files], f"XFOIL sweep, station {section['id']}")
     candidates, n_unconverged, n_unphysical, n_cm = [], 0, 0, 0
     for path, _gf, polar in results:
         if not polar or len(polar) < 2:   # <2 converged alphas = unreliable solve
@@ -312,19 +390,25 @@ def sweep_candidates_for_sections(sections, catalog_dir, num_cores, bwb=False, a
             print(f"\n[+] Station #{s['id']} ({s['zone']}) | Re {s['Re']:,} | alphas {alphas}")
 
             min_tc = _min_tc(s, af_cfg)
-            files = [f for f in all_files if thickness[f] >= min_tc]
-            print(f"    [i] Thickness screen t/c >= {min_tc:.2f}: {len(all_files) - len(files)} rejected, "
+            max_tc = _max_tc(s, af_cfg)
+            files = [f for f in all_files if min_tc <= thickness[f] <= max_tc]
+            print(f"    [i] Thickness screen {min_tc:.2f} <= t/c <= {max_tc:.2f}: {len(all_files) - len(files)} rejected, "
                   f"{len(files)} proceed.")
 
             cm_min = float(af_cfg["CM_MIN_BWB"] if bwb else af_cfg["CM_MIN"])
             candidates = _evaluate_files(pool, files, s, mach, alphas, cm_min)
-            rest = [f for f in all_files if f not in files]
+            rest = [f for f in all_files if f not in files and thickness[f] <= max_tc]   # relax the minimum only, never the maximum
             if not candidates and rest:
                 # Never let the structural screen empty a station: fall back to the thinner sections.
                 print(f"    [!] No screened profile is feasible; relaxing the thickness screen "
                       f"({len(rest)} more candidates).")
                 candidates = _evaluate_files(pool, rest, s, mach, alphas, cm_min)
             candidates.sort(key=lambda c: _score(c, bwb), reverse=True)
+            evaluated = candidates
+            if candidates and af_cfg.get("STALL_CHECK", True):
+                candidates, evaluated = apply_stall_filter(pool, candidates, s, mach, af_cfg)
+                if not candidates:
+                    print("    [!] No airfoil meets the stall limit: raise STALL_DROP_MAX / STALL_DELTA_ALPHA or switch STALL_CHECK off.")
 
             if not candidates:
                 print(f"    [!] No feasible profile converged for station #{s['id']}.")
@@ -335,7 +419,10 @@ def sweep_candidates_for_sections(sections, catalog_dir, num_cores, bwb=False, a
             final[s["id"]] = {"id": s["id"], "zone": s["zone"], "eta": s["eta"],
                               "winner": best["name"], "winner_path": best["path"],
                               "winner_ld": best["avg_ld"], "winner_cm": best["avg_cm"],
-                              "ranking": candidates[:5]}
+                              "ranking": candidates[:5],
+                              "all": [{"name": c["name"], "path": c["path"], "avg_ld": c["avg_ld"], "avg_cm": c["avg_cm"],
+                                       "stall_drop": c.get("stall_drop"), "clmax": c.get("clmax"), "stall_ok": c.get("stall_ok", True)}
+                                      for c in evaluated]}
     finally:
         if own_pool:
             pool.close()
@@ -355,7 +442,7 @@ def optimize_airfoil_geometry(airfoil_path, Re, target_alpha, original_cm, num_c
     pool = pool or multiprocessing.Pool(processes=num_cores)
     try:
         t0 = time.time()
-        res = pool.map(_parallel_xfoil_worker, [(airfoil_path, Re, mach, [alpha], g) for g in grid])
+        res = _pmap(pool, _parallel_xfoil_worker, [(airfoil_path, Re, mach, [alpha], g) for g in grid], "shape refinement")
         print(f"    {len(grid)} variants in {time.time() - t0:.1f}s")
     finally:
         if own_pool:
@@ -420,6 +507,108 @@ def choose_catalog(default, interactive):
         if a.isdigit() and 1 <= int(a) <= len(CATALOGS):
             return CATALOGS[int(a) - 1]
         print("    Invalid choice.")
+
+
+# ─── RESULTS FILE (shapes, type, Pareto) ─────────────────────────────────────
+FAMILIES = (("naca64a", "NACA 6-series (64A)"), ("naca", "NACA"), ("opt_", "Refined (TFAC) variant"), ("sc2", "NASA supercritical SC(2)"),
+            ("sc", "NASA supercritical"), ("whitcomb", "Whitcomb supercritical"), ("mh", "Hepperle MH"), ("eh", "Althaus EH"),
+            ("fx", "Wortmann FX"), ("goe", "Goettingen"), ("clark", "Clark"), ("rae", "RAE"), ("ag", "Drela AG"), ("dae", "Drela DAE"),
+            ("sd", "Selig/Donovan SD"), ("sg", "Selig/Giguere SG"), ("ua", "UA"), ("e", "Eppler"), ("s", "Selig S"), ("n", "NACA/NASA N"))
+
+
+def family_of(name):
+    stem = os.path.splitext(name)[0].lower().replace("phase2_", "")
+    for prefix, fam in FAMILIES:
+        if stem.startswith(prefix):
+            return fam
+    return "UIUC database"
+
+
+def read_coords(path):
+    pts = []
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            t = line.split()
+            if len(t) >= 2:
+                try:
+                    pts.append((float(t[0]), float(t[1])))
+                except ValueError:
+                    pass
+    return pts
+
+
+def shape_info(coords):
+    """Thickness, camber and reflex of a Selig-ordered coordinate list."""
+    xs = np.array([c[0] for c in coords])
+    le = int(np.argmin(xs))
+    up, lo = coords[:le + 1][::-1], coords[le:]
+    grid = np.linspace(0.0, 1.0, 101)
+    yu = np.interp(grid, [c[0] for c in up], [c[1] for c in up])
+    yl = np.interp(grid, [c[0] for c in lo], [c[1] for c in lo])
+    camber = (yu + yl) / 2.0
+    return {"tc": float((yu - yl).max()), "camber": float(camber[np.argmax(np.abs(camber))]),
+            "x_camber": float(grid[np.argmax(np.abs(camber))]), "reflexed": bool(camber[85:].mean() < -0.001)}
+
+
+def thin_coords(coords, n=70):
+    k = max(1, len(coords) // n)
+    out = coords[::k]
+    if out[-1] != coords[-1]:
+        out.append(coords[-1])
+    return [[round(x, 4), round(y, 4)] for x, y in out]
+
+
+def airfoil_entry(name, path, ld, cm, with_shape, stall_drop=None, clmax=None):
+    e = {"name": os.path.splitext(name)[0], "family": family_of(name), "ld": round(ld, 2), "cm": round(cm, 4),
+         "stall_drop": None if stall_drop is None else round(stall_drop, 4), "clmax": None if clmax is None else round(clmax, 3)}
+    if with_shape:
+        coords = read_coords(path)
+        e.update(shape_info(coords))
+        e["coords"] = thin_coords(coords)
+    return e
+
+
+def pareto_front(points, bwb):
+    """Non-dominated set maximizing L/D and a Cm score (BWB: closeness to +0.01; otherwise the higher, less nose-down Cm)."""
+    score = (lambda p: -abs(p["avg_cm"] - 0.01)) if bwb else (lambda p: p["avg_cm"])
+    front, best = [], -1e9
+    for p in sorted(points, key=lambda p: (-p["avg_ld"], -score(p))):
+        if score(p) > best + 1e-12:
+            front.append(p)
+            best = score(p)
+    return front
+
+
+def results_dir():
+    return os.environ.get("RAPID_OUTPUT_DIR") or os.path.join(WORK_DIR, "wing_models", "airfoil")
+
+
+def write_results(selections, sections, catalog, bwb):
+    by_id = {s["id"]: s for s in sections}
+    out = {"catalog": catalog, "bwb": bool(bwb), "stall_delta": float(load_effective_config()["airfoil"]["STALL_DELTA_ALPHA"]),
+           "sections": []}
+    for sid, d in selections.items():
+        if not d:
+            continue
+        sec = by_id[sid]
+        front = pareto_front([p for p in d.get("all", []) if p.get("stall_ok", True)], bwb)
+        if len(front) > 10:                                   # thin to <= 10 cards, keeping both ends
+            idx = np.linspace(0, len(front) - 1, 10).round().astype(int)
+            front = [front[i] for i in sorted(set(idx))]
+        names = {p["name"] for p in front}
+        out["sections"].append({
+            "id": sid, "zone": d["zone"], "eta": round(float(d["eta"]), 4), "Re": sec["Re"], "alpha": round(sec["alpha"], 2),
+            "winner": airfoil_entry(d["winner"], d.get("winner_path"), d["winner_ld"], d["winner_cm"], True,
+                                    next((p.get("stall_drop") for p in d.get("all", []) if p["name"] == d["winner"]), None),
+                                    next((p.get("clmax") for p in d.get("all", []) if p["name"] == d["winner"]), None)),
+            "points": [{**airfoil_entry(p["name"], p["path"], p["avg_ld"], p["avg_cm"], p["name"] in names, p.get("stall_drop"), p.get("clmax")),
+                        "pareto": p["name"] in names, "stall_ok": p.get("stall_ok", True)}
+                       for p in d.get("all", [])]})
+    os.makedirs(results_dir(), exist_ok=True)
+    path = os.path.join(results_dir(), "airfoil_results.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f)
+    print(f"[✓] Airfoil results (shapes + Pareto) saved: {path}")
 
 
 def plot_winners(selections, out_png=None, show=True):
@@ -534,6 +723,8 @@ def run_pipeline(sections, num_cores, cfg, catalog=None, interactive=True,
     finally:
         pool.close()
         pool.join()
+
+    write_results(selections, sections, catalog, bwb)
 
     do_write = write_active if write_active is not None else _ask_yn(
         "Back-feed these profiles into the planform optimizer (active_airfoils.json)?", True, interactive)

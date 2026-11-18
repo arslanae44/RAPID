@@ -7,11 +7,16 @@
   },
   "transonic": {
     "MDD_MIN": 0.78,
-    "MDD_GOAL": 0.90,
+    "MDD_GOAL": 0.9,
     "TC_VARIABLE": true,
-    "STALL_ETA_OUT": 0.65,
+    "STALL_ETA_OUT": 0.70,
     "STALL_MARGIN": 1.0,
     "FUEL_SHARE_MIN": 0.5,
     "PITCHUP_ENABLED": true
+  },
+  "airfoil": {
+    "MAX_TC_ROOT": 0.13,
+    "MAX_TC_MID": 0.12,
+    "MAX_TC_TIP": 0.11
   }
 }

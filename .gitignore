@@ -77,3 +77,6 @@ system_files/rapid_config.json
 
 # Local Python 3.13 environment created by SETUP.bat
 .venv/
+
+# Per-user GUI settings (Save settings button)
+system_files/gui_settings.json

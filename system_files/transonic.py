@@ -321,7 +321,7 @@ def apply_stall(out, tcfg):
     return out
 
 
-CONSTRAINT_NAMES = ("Mdd >= MDD_MIN", "pitch-up", "tip stall", "fuel volume", "|Cm|", "t/c tip <= root")
+CONSTRAINT_NAMES = ("Mdd >= MDD_MIN", "pitch-up", "tip stall", "fuel volume", "|Cm|", "t/c tip <= root", "root chord >= CROOT_MIN")
 
 
 def constraint_values(out, d, tcfg):
@@ -335,5 +335,6 @@ def constraint_values(out, d, tcfg):
         (float(tcfg["FUEL_SHARE_MIN"]) - out["fuel_share"]) / 0.1,
         (abs(out["CM"]) - float(tcfg["CM_MAX"])) / 0.1,
         (d["TC_TIP"] - d["TC_ROOT"]) / 0.01,
+        (float(tcfg.get("CROOT_MIN", 0.0)) - out["cr"]) / 0.1,
     ]
     return g

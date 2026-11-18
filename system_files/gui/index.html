@@ -34,7 +34,13 @@
   th, td { text-align:right; padding:4px 8px; border-bottom:1px solid var(--line); }
   th { color:var(--mut); font-weight:500; position:sticky; top:0; background:var(--bg); }
   .tw { max-height:300px; overflow:auto; }
+  #prog { min-height:22px; display:flex; align-items:center; gap:10px; }
+  progress { width:280px; height:10px; accent-color:var(--acc); }
+  .pulse { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--acc); animation:pulse 1s infinite alternate; }
+  @keyframes pulse { from { opacity:.25; } to { opacity:1; } }
   img { max-width:100%; border:1px solid var(--line); border-radius:4px; margin:0 0 12px; }
+  /* matplotlib PNGs are white: invert them in dark mode (hue-rotate keeps the colours recognisable) */
+  @media (prefers-color-scheme: dark) { img { filter: invert(.9) hue-rotate(180deg); } }
   details { margin-top:8px; }
   .hint { color:var(--mut); font-size:13px; margin:0 0 8px; max-width:720px; }
   .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:10px; margin:12px 0 16px; }
@@ -62,6 +68,7 @@
   <section id="form"></section>
   <section>
     <div class="bar" id="bar"></div>
+    <div id="prog" class="hint"></div>
     <pre id="log"></pre>
     <div id="res"></div>
   </section>
@@ -71,15 +78,24 @@ const TOKEN = "__TOKEN__";
 const MODES = [["transonic","Transonic"],["conventional","Conventional"],["bwb","BWB"],["airfoil","Airfoil"],["check","Check"]];
 const OPTS = {
   transonic:    [["pop","Population",40],["gens","Generations",30],["cores","Cores (blank = all)",""],["seed","Seed",1],
-                 ["select","Pick from front",["range","drag","weight","weighted"]],["fresh","Fresh start",false],["no_tc","Fix t/c",false]],
+                 ["select","Pick from front",["range","drag","weight","weighted"]],["fresh","Fresh start",false],["no_tc","Fix t/c",false],
+                 ["airfoil","Airfoil co-opt after",false],["catalog","Airfoil catalog",["UIUC_All","Medium_Re","High_Re","Low_Re","Reflexed"]]],
   conventional: [["pop","Population",32],["gens","Generations",20],["cores","Cores (blank = all)",""],["fresh","Fresh start",false],["airfoil","Airfoil co-opt after",false]],
   bwb:          [["pop","Population",32],["gens","Generations",20],["cores","Cores (blank = all)",""],["fresh","Fresh start",false],["airfoil","Airfoil co-opt after",false]],
   airfoil:      [["vsp3",".vsp3 wing","system_files/presets/example_transport_wing.vsp3"],["n_sections","Stations",5],
                  ["catalog","Catalog",["Low_Re","Medium_Re","High_Re","UIUC_All","Reflexed"]],["cores","Cores (blank = all)",""],["refine","Refine shape",false]],
   check:        [],
 };
-let mode = "transonic", cfg = {}, opts = {}, offset = 0, polling = null;
+let mode = "transonic", cfg = {}, opts = {}, offset = 0, polling = null, prog = null;
 const $ = id => document.getElementById(id);
+
+function deepMerge(a, b) {
+  if (!b || typeof b !== "object" || Array.isArray(b)) return b === undefined ? a : b;
+  const o = Object.assign({}, a);
+  for (const k of Object.keys(b)) o[k] = (a && typeof a[k] === "object" && !Array.isArray(a[k])) ? deepMerge(a[k], b[k]) : b[k];
+  return o;
+}
+function draft() { try { localStorage.setItem("rapid_draft_" + mode, JSON.stringify({cfg, opts})); } catch (e) {} }
 
 function el(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
@@ -102,7 +118,7 @@ function renderConfig(obj, host, path = []) {
     if (v && typeof v === "object" && !Array.isArray(v)) {
       const d = el("details", path.length ? {} : {open: ""}, el("summary", {}, [...path, k].join(" / ")));
       renderConfig(v, d, [...path, k]); host.append(d);
-    } else host.append(field(k, v, nv => { obj[k] = nv; }));
+    } else host.append(field(k, v, nv => { obj[k] = nv; draft(); }));
   }
 }
 
@@ -113,9 +129,9 @@ function render() {
   f.append(el("h3", {}, "Run"));
   for (const [k, label, def] of OPTS[mode]) {
     if (Array.isArray(def)) {
-      const s = el("select", {onchange: () => opts[k] = s.value}); def.forEach(o => s.append(el("option", {}, o))); s.value = opts[k];
+      const s = el("select", {onchange: () => { opts[k] = s.value; draft(); }}); def.forEach(o => s.append(el("option", {value: Array.isArray(o) ? o[0] : o}, Array.isArray(o) ? o[1] : o))); s.value = opts[k];
       f.append(el("div", {class:"row"}, el("label", {}, label), s));
-    } else f.append(field(label, opts[k], nv => opts[k] = nv));
+    } else f.append(field(label, opts[k], nv => { opts[k] = nv; draft(); }));
   }
   if (Object.keys(cfg).length) { f.append(el("h3", {}, "Parameters")); renderConfig(cfg, f); }
   const bar = $("bar"); bar.innerHTML = "";
@@ -124,13 +140,24 @@ function render() {
   if (mode === "transonic") bar.append(el("button", {class:"b", id:"rep", onclick: () => run("report")}, "Rebuild report"));
   if (mode === "conventional" || mode === "bwb") bar.append(el("button", {class:"b", id:"plot", onclick: () => run("plot")}, "Make plot"));
   bar.append(el("button", {class:"b stop", id:"stop", onclick: stop}, "Stop"),
-             el("button", {class:"b", id:"reset", onclick: resetMode}, "Reset"), el("span", {id:"status"}, ""));
+             el("button", {class:"b", id:"reset", onclick: resetMode}, "Reset"),
+             el("button", {class:"b", id:"save", onclick: saveSettings}, "Save settings"), el("span", {id:"status"}, ""));
 }
 
 async function setMode(m) {
   mode = m;
-  cfg = await (await fetch("/api/config?mode=" + m)).json();
-  opts = {}; for (const [k, , def] of OPTS[m]) opts[k] = Array.isArray(def) ? def[0] : def;
+  const r = await (await fetch("/api/config?mode=" + m)).json();
+  cfg = r.config;
+  if (m === "airfoil") {                                   // the wings this GUI produced, as a dropdown
+    const w = await (await fetch("/api/wings")).json();
+    OPTS.airfoil[0] = ["vsp3", "Wing to work on", w];
+  }
+  opts = {}; for (const [k, , def] of OPTS[m]) opts[k] = Array.isArray(def) ? (Array.isArray(def[0]) ? def[0][0] : def[0]) : def;
+  Object.assign(opts, r.options);
+  try {                                                   // unsaved edits survive a page refresh
+    const d = JSON.parse(localStorage.getItem("rapid_draft_" + m) || "null");
+    if (d) { cfg = deepMerge(cfg, d.cfg); Object.assign(opts, d.opts); }
+  } catch (e) {}
   render(); showResults();
 }
 
@@ -145,8 +172,14 @@ async function run(action) {
 }
 const stop = () => post("/api/stop", {});
 
+async function saveSettings() {
+  await post("/api/save", {mode, config: cfg, options: opts});
+  const st = $("status"); st.textContent = "settings saved";
+  setTimeout(() => { if (st.textContent === "settings saved") st.textContent = ""; }, 2500);
+}
+
 async function resetMode() {
-  if (!confirm("Reset " + mode + "?\n\nThis deletes the saved results and checkpoint of this mode and restores the default parameters.")) return;
+  if (!confirm("Reset " + mode + "?\n\nThis deletes the saved results and checkpoint of this mode. Your parameter settings are kept.")) return;
   const r = await post("/api/reset", {mode});
   if (r.error) { alert(r.error); return; }
   $("log").textContent = ""; offset = 0;
@@ -161,7 +194,14 @@ function poll() {
     const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
     if (r.text) { log.textContent += r.text; if (atEnd) log.scrollTop = log.scrollHeight; }
     const st = $("status"), go = $("go");
+    for (const m of (r.text || "").matchAll(/\[progress\] (\d+)\/(\d+) ([^\r\n]*)/g)) prog = {done: +m[1], total: +m[2], label: m[3]};
     if (st) st.textContent = r.running ? `${r.label} · ${r.secs}s` : (r.code === null ? "idle" : r.code === 0 ? "finished" : "stopped / failed (exit " + r.code + ")");
+    const pg = $("prog"); pg.innerHTML = "";
+    if (r.running) {
+      pg.append(el("span", {class: "pulse"}));
+      if (prog) pg.append(el("progress", {max: prog.total, value: prog.done}), el("span", {}, `${prog.done}/${prog.total} ${prog.label}`));
+      pg.append(el("span", {}, r.idle > 60 ? `no new output for ${r.idle}s: still computing (XFOIL runs can be slow)` : `last output ${r.idle}s ago`));
+    } else prog = null;
     ["go","rep","plot","reset"].forEach(i => { if ($(i)) $(i).disabled = r.running; });
     if (!r.running) { clearInterval(polling); showResults(); }
   }, 1000);
@@ -184,6 +224,12 @@ function planform(poly, cls, ext) {
   return svg;
 }
 
+function airfoilShape(coords, cls) {
+  const svg = sv("svg", {viewBox: "-0.03 -0.15 1.06 0.30", preserveAspectRatio: "xMidYMid meet"});
+  svg.append(sv("polygon", {points: coords.map(([x, y]) => x.toFixed(4) + "," + (-y).toFixed(4)).join(" "), class: "plan " + cls}));
+  return svg;
+}
+
 function paretoView(P, host) {
   host.append(el("p", {class: "hint"}, P.hint));
   const W = 660, H = 340, m = {l: 64, r: 18, t: 12, b: 46}, pts = P.points;
@@ -198,24 +244,26 @@ function paretoView(P, host) {
     sv("text", {x: m.l - 6, y: Y(v) + 3, "text-anchor": "end"}, v.toFixed(Math.abs(y1 - y0) < 20 ? 1 : 0))));
   svg.append(sv("text", {x: (m.l + W - m.r) / 2, y: H - 6, "text-anchor": "middle"}, P.xlabel));
   svg.append(sv("text", {transform: `translate(14 ${(m.t + H - m.b) / 2}) rotate(-90)`, "text-anchor": "middle"}, P.ylabel));
-  const front = pts.filter(p => p.tag !== "chart");
+  const front = pts.filter(p => p.tag !== "chart" && !p.nocard).sort((a, b) => a.x - b.x);
   svg.append(sv("polyline", {points: front.map(p => X(p.x) + "," + Y(p.y)).join(" "), fill: "none", stroke: "var(--line)", "stroke-width": 1.5}));
   const ext = {x: 0, y: 0};
-  pts.forEach(p => p.poly.forEach(([y, x]) => { ext.y = Math.max(ext.y, y); ext.x = Math.max(ext.x, x); }));
+  if (P.shape !== "airfoil") pts.forEach(p => p.poly.forEach(([y, x]) => { ext.y = Math.max(ext.y, y); ext.x = Math.max(ext.x, x); }));
   const cards = el("div", {class: "cards"}), dots = [], cardEls = [];
   const hl = (i, on) => { dots[i].setAttribute("r", on ? 9 : (pts[i].tag ? 7 : 5)); cardEls[i].classList.toggle("hl", on); };
   const order = pts.map((p, i) => i).sort((a, b) => (pts[a].tag === "chart") - (pts[b].tag === "chart"));
   let n = 0;
   order.forEach(i => {
-    const p = pts[i], label = p.tag === "chart" ? "chart" : String(++n);
+    const p = pts[i];
+    if (p.nocard) { dots[i] = sv("circle", {cx: X(p.x), cy: Y(p.y), r: 3, fill: "var(--mut)", "fill-opacity": .4}); svg.append(dots[i]); return; }
+    const label = p.tag === "chart" ? "chart" : String(++n);
     const col = p.tag === "chosen" ? "#e0a800" : p.tag === "chart" ? "var(--bad)" : "var(--acc)";
     const c = sv("circle", {cx: X(p.x), cy: Y(p.y), r: p.tag ? 7 : 5, fill: col, "fill-opacity": .85, stroke: "var(--bg)", "stroke-width": 1.5});
     c.onmouseenter = () => hl(i, true); c.onmouseleave = () => hl(i, false);
     dots[i] = c; svg.append(c);
     if (p.tag !== "chart") svg.append(sv("text", {x: X(p.x) + 8, y: Y(p.y) - 6, class: "num"}, label));
-    const title = p.tag === "chart" ? "Chart wing" : (p.tag === "chosen" ? "★ #" + label + " (chosen)" : "#" + label);
+    const title = p.title ? (p.tag === "chosen" ? "★ " : "#" + label + " ") + p.title : p.tag === "chart" ? "Chart wing" : (p.tag === "chosen" ? "★ #" + label + " (chosen)" : "#" + label);
     const card = el("div", {class: "card"}, el("b", {}, title));
-    card.append(planform(p.poly, p.tag, ext));
+    card.append(P.shape === "airfoil" ? airfoilShape(p.poly, p.tag) : planform(p.poly, p.tag, ext));
     p.lines.forEach(l => card.append(el("small", {}, l)));
     card.onmouseenter = () => hl(i, true); card.onmouseleave = () => hl(i, false);
     cardEls[i] = card; cards.append(card);
@@ -226,6 +274,7 @@ function paretoView(P, host) {
 async function showResults() {
   const r = await (await fetch("/api/results?mode=" + mode)).json(), host = $("res"); host.innerHTML = "";
   if (r.pareto && r.pareto.points.length) paretoView(r.pareto, host);
+  (r.paretos || []).forEach(P => { host.append(el("h3", {}, P.title)); paretoView(P, host); });
   const more = el("details", {}, el("summary", {}, "More plots and table"));
   r.images.forEach(u => { if (!(r.pareto && u.includes("pareto.png"))) more.append(el("img", {src: u + "&t=" + Date.now()})); });
   if (r.table && r.table.rows.length) {

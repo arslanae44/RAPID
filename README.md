@@ -135,16 +135,16 @@ Run **`RUN_TRANSONIC.bat`** (or `python system_files	ransonic_opti.py --pop 40 -
 | piece | model |
 |---|---|
 | lift, induced drag, strip loads | one VSPAERO VLM run per wing at M 0.15 and M 0.75, two angles of attack each; the wing is **trimmed to CL = 0.272** (VLM is linear in α) and `C_Di` is fitted as `s²(CL − CL₀)²` through the two solved points |
-| wave drag | per strip: Korn `M_dd = κ/cosΛ − (t/c)/cos²Λ − cl/(10cos³Λ)` (κ = 0.87), `M_crit = M_dd − (0.1/80)^(1/3)`, Lock `C_Dw = 20(M − M_crit)⁴`, area-weighted over the span. Λ is the half-chord sweep (`KORN_CHORD_FRAC` = 0.25 gives the quarter-chord form) |
+| wave drag | per strip: Korn `M_dd = κ/cosΛ − (t/c)/cos²Λ − cl/(10cos³Λ)` (κ = 0.87), `M_crit = M_dd − (0.1/80)^(1/3)`, Lock `C_Dw = 20(M − M_crit)⁴`, area-weighted over the span. Λ is the quarter-chord sweep by default (`KORN_CHORD_FRAC` = 0.25, the Study-3 convention; 0.5 = half-chord, about 0.02 lower M_dd) |
 | profile drag | XFOIL polars of both sections (Re 11.56e6, transition fixed at 5 %), blended along the span, scaled to each strip's Reynolds number (`Re^-0.2`) and t/c (Hoerner form factor) |
 | wing weight | Raymer eq. 15.25 (fighter/attack), `N_z = 1.5 × 7.33`; fuel volume from Raymer's integral-tank estimate |
-| constraints | `M_dd,min ≥ 0.78`; pitch-up (`AR` below the Raymer Fig. 4.21 boundary); tip stall (first strip to reach `cl/cl_max` must lie inboard of 65 % span, `cl_max` 1.79 root → 1.5 tip); wing fuel ≥ 50 % of 1.84 m³; `|Cm| ≤ 0.35` |
+| constraints | `M_dd,min ≥ 0.78`; pitch-up (`AR` below the Raymer Fig. 4.21 boundary); tip stall (first strip to reach `cl/cl_max` must lie inboard of 70 % span, `cl_max` 1.79 root → 1.5 tip); wing fuel ≥ 50 % of 1.84 m³; `|Cm| ≤ 0.35`; root chord ≥ `CROOT_MIN` (2.5 m) |
 
 The benchmark **chart wing** (AR 5.25, Λ_LE 30°, λ 0.3, −3° washout) is solved through the same chain, seeded into generation 0 and compared with the chosen wing. One wing is picked from the front by Breguet range factor `(L/D)·ln(W0/(W0 − fuel))` at fixed gross weight (`--select drag|weight|weighted` for others). `report/` holds `report.md`, `pareto.json`, `pareto.png`, `spanwise.png` (cl, M_dd / M_crit, local `C_Dw`, stall margin vs span) and the spanwise CSVs.
 
 Constraint thresholds can be changed **without re-solving**: the report re-judges every stored wing, so edit the config and run `transonic_opti.py --report-only`.
 
-> **Limits.** (1) The pitch-up boundary in the config is a **placeholder** (Raymer's figure is not digitized); replace `PITCHUP_SWEEP_DEG` / `PITCHUP_AR_MAX` with points read from your copy, because it strongly shapes the answer. (2) Wing alone: no fuselage, tail or interference drag. (3) The VLM stall check assumes the lift distribution stays linear up to `CL_max`; the loading is flat over 50-80 % span, so the inboard/outboard margin is tiny. (4) Korn/Lock are empirical, so validate promising wings with CFD.
+> **Limits.** (1) The pitch-up boundary in the config was digitized from Raymer Fig. 4.21 (about ±1° and ±0.2 AR); edit `PITCHUP_SWEEP_DEG` / `PITCHUP_AR_MAX` to change it, because it strongly shapes the answer. (2) Wing alone: no fuselage, tail or interference drag. (3) The VLM stall check assumes the lift distribution stays linear up to `CL_max`; the loading is flat over 50-80 % span, so the inboard/outboard margin is tiny. (4) Korn/Lock are empirical, so validate promising wings with CFD.
 
 ---
 

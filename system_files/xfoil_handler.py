@@ -3,7 +3,7 @@ import subprocess
 import sys
 import time
 
-def analyze_airfoil(airfoil_path, reynolds, mach=0.0, alphas=[0.0], max_iter=100, work_dir=None, geom_factors=None, save_coords_path=None):
+def analyze_airfoil(airfoil_path, reynolds, mach=0.0, alphas=[0.0], max_iter=100, work_dir=None, geom_factors=None, save_coords_path=None, timeout=35):
     """
     Runs viscous aerodynamic analysis on a given airfoil using the embedded XFOIL 6.99 engine.
     Optionally tweaks thickness/camber geometries and exports scaled profile coordinates.
@@ -161,7 +161,7 @@ def analyze_airfoil(airfoil_path, reynolds, mach=0.0, alphas=[0.0], max_iter=100
         with open(cmd_path, "r") as f:
             script_input = f.read()
             
-        stdout, stderr = proc.communicate(input=script_input, timeout=35)
+        stdout, stderr = proc.communicate(input=script_input, timeout=timeout)
         
         with open(os.path.join(workspace, local_log_name), "w") as lf:
             lf.write("--- STDOUT ---\n" + (stdout or "") + "\n--- STDERR ---\n" + (stderr or ""))

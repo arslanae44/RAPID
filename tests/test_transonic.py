@@ -97,8 +97,10 @@ class WeightFuelTests(unittest.TestCase):
 
 class PitchupAndStallTests(unittest.TestCase):
     def test_pitchup_interpolation(self):
-        self.assertAlmostEqual(T.pitchup_ar_limit(25.0, TC), 6.5)
+        # digitized Raymer Fig. 4.21 table: 20 deg -> 7.0, 30 deg -> 5.1, linear in between
+        self.assertAlmostEqual(T.pitchup_ar_limit(25.0, TC), 6.05)
         self.assertGreater(T.pitchup_ar_limit(10.0, TC), T.pitchup_ar_limit(40.0, TC))
+        self.assertGreater(T.pitchup_ar_limit(25.4, TC), 5.25)            # the Study-3 chart wing is inside the boundary
 
     def test_stall_onset_first_strip_and_ratio(self):
         eta = np.linspace(0.05, 0.95, 10)
@@ -156,7 +158,7 @@ class PolarTests(unittest.TestCase):
 class ConstraintTests(unittest.TestCase):
     def _out(self, **kw):
         base = {"Mdd_min": 0.80, "AR_pitchup_limit": 6.0, "stall_eta_first": 0.5, "stall_out_ratio": 0.99,
-                "fuel_share": 0.8, "CM": -0.05}
+                "fuel_share": 0.8, "CM": -0.05, "cr": 2.75}
         base.update(kw)
         return base
 
@@ -173,6 +175,8 @@ class ConstraintTests(unittest.TestCase):
             self.assertGreater(g[i], 0, T.CONSTRAINT_NAMES[i])
         g = T.constraint_values(self._out(), dict(CHART, TC_TIP=0.13), TC)
         self.assertGreater(g[5], 0)
+        g = T.constraint_values(self._out(cr=TC["CROOT_MIN"] - 0.5), CHART, TC)
+        self.assertGreater(g[6], 0, "root chord")
 
 
 if __name__ == "__main__":

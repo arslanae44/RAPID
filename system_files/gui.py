@@ -40,9 +40,38 @@ STATE = {"proc": None, "mode": None, "label": "", "started": 0.0}
 LOCK = threading.Lock()
 
 
+# ─── SAVED SETTINGS ──────────────────────────────────────────────────────────
+SETTINGS = os.path.join(SCRIPT_DIR, "gui_settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(mode, config, options):
+    data = load_settings()
+    data[mode] = {"config": config, "options": {k: v for k, v in options.items() if k != "fresh"}}
+    with open(SETTINGS, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    return {"ok": True}
+
+
+def forget_settings(mode):
+    data = load_settings()
+    if data.pop(mode, None) is not None:
+        with open(SETTINGS, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+
 # ─── CONFIGS PER MODE ────────────────────────────────────────────────────────
 def mode_config(mode):
     base = copy.deepcopy(DEFAULTS)
+    if mode in ("conventional", "airfoil"):                    # start from the user's own rapid_config.json
+        base = _deep_merge(base, load_raw_config())
     if mode == "bwb":
         base = _deep_merge(base, load_raw_config(os.path.join(SCRIPT_DIR, "bwb_config.json")))
     elif mode == "transonic":
@@ -50,7 +79,14 @@ def mode_config(mode):
     if mode == "airfoil":
         return {"flight": base["flight"], "airfoil": base["airfoil"]}
     if mode == "transonic":
-        return {"transonic": base["transonic"], "mesh": base["mesh"]}
+        # airfoil settings come from the user's current Airfoil-tab settings; the preset only supplies a sensible max t/c
+        af = copy.deepcopy(DEFAULTS["airfoil"])
+        af.update(load_raw_config().get("airfoil", {}))
+        af.update(load_settings().get("airfoil", {}).get("config", {}).get("airfoil", {}))
+        for k in ("MAX_TC_ROOT", "MAX_TC_MID", "MAX_TC_TIP"):
+            if float(af.get(k, 1.0)) >= 1.0:
+                af[k] = base["airfoil"][k]
+        return {"transonic": base["transonic"], "mesh": base["mesh"], "airfoil": af}
     if mode == "check":
         return {}
     return base
@@ -76,6 +112,7 @@ def start(req):
         os.makedirs(out, exist_ok=True)
         env = os.environ.copy()
         env["RAPID_OUTPUT_DIR"] = out
+        env["PYTHONUNBUFFERED"] = "1"          # a redirected stdout is block-buffered otherwise: no live log
         env.pop("RAPID_ACTIVE_AIRFOILS", None)
         cfg_path = os.path.join(out, "gui_config.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
@@ -90,6 +127,8 @@ def start(req):
                 cmd.append("--fresh")
             if opt.get("no_tc"):
                 cmd.append("--no-tc")
+            if opt.get("airfoil"):
+                cmd += ["--airfoil", "--catalog", s("catalog", "UIUC_All")]
             if action == "report":
                 cmd.append("--report-only")
             if s("cores"):
@@ -221,15 +260,81 @@ def pareto_planform(mode, out):
                     "curve trades CL for L/D. Numbers match the planform cards below.", "points": pts}
 
 
+def pareto_airfoil(out):
+    pj = os.path.join(out, "airfoil_results.json")
+    if not os.path.exists(pj):
+        return None
+    d = json.load(open(pj, encoding="utf-8"))
+    delta = d.get("stall_delta", 2.0)
+    res = []
+
+    def lines(e):
+        shape = f"t/c {e['tc']*100:.1f} % · camber {e['camber']*100:.1f} %" + (" · reflexed" if e["reflexed"] else "")
+        stall = "stall: no post-stall data" if e.get("stall_drop") is None else f"stall: -{e['stall_drop']*100:.0f} % CL in {delta:g}° past CLmax"
+        return [e["family"], shape, f"L/D {e['ld']:.1f} · Cm {e['cm']:+.3f}", stall]
+
+    for sec in d["sections"]:
+        pts, win = [], sec["winner"]
+        for p in sec["points"]:
+            if p["pareto"]:
+                pts.append({"x": p["ld"], "y": p["cm"], "tag": "chosen" if p["name"] == win["name"] else "", "poly": p["coords"],
+                            "title": p["name"].upper(), "lines": lines(p)})
+            else:
+                pts.append({"x": p["ld"], "y": p["cm"], "tag": "", "nocard": True, "poly": []})
+        if not any(q["tag"] == "chosen" for q in pts):            # refined / off-front winner still gets a card
+            pts.append({"x": win["ld"], "y": win["cm"], "tag": "chosen", "poly": win["coords"], "title": win["name"].upper(), "lines": lines(win)})
+        res.append({"title": f"Station {sec['id']} · {sec['zone']} · span {sec['eta']*100:.0f} % · Re {sec['Re']/1e6:.1f}M · α {sec['alpha']}°",
+                    "shape": "airfoil", "xlabel": "Average L/D  →  more efficient", "ylabel": "Pitching moment Cm  →  less nose-down",
+                    "hint": f"Each dot is a catalog section ({d['catalog']}) at this station's Reynolds number and angle. Coloured dots are Pareto-optimal: "
+                            "no other section has both higher L/D and a less nose-down Cm. Grey = dominated or rejected by the stall check. "
+                            "Gold = the section the optimizer picked. Cards show the shape and type.", "points": pts})
+    return res
+
+
 def reset(mode):
     with LOCK:
         if running():
             return {"error": "stop the active run first"}
-        out = os.path.abspath(outdir(mode))
+        out = os.path.abspath(outdir(mode))      # results + checkpoint only; saved settings are kept
         if not out.startswith(os.path.abspath(WM) + os.sep) or not os.path.isdir(out):
             return {"ok": True}
         shutil.rmtree(out, ignore_errors=True)
         return {"ok": True}
+
+
+# ─── WINGS THE AIRFOIL TAB CAN WORK ON ───────────────────────────────────────
+def list_wings():
+    """[[relative .vsp3 path, label], ...]: the wings this GUI has produced, plus the example preset."""
+    items = []
+
+    def add(path, label):
+        if os.path.exists(os.path.join(ROOT, path)):
+            items.append([path.replace("\\", "/"), label])
+
+    tdir = os.path.join(WM, "transonic")
+    rep = os.path.join(tdir, "report")
+    try:
+        front = json.load(open(os.path.join(rep, "pareto.json"), encoding="utf-8"))
+        ch = json.load(open(os.path.join(rep, "chosen_wing.json"), encoding="utf-8"))["design"]
+        pick = lambda r: f"wing_models/transonic/{r['name']}/{r['name']}.vsp3"                       # noqa: E731
+        for r in front:
+            if abs(r["AR"] - ch["AR"]) < 1e-6 and abs(r["SWEEP_LE"] - ch["SWEEP_LE"]) < 1e-6:
+                add(pick(r), "Transonic: chosen wing")
+        add(pick(min(front, key=lambda r: r["CD"])), "Transonic: lowest-drag Pareto wing")
+        add(pick(min(front, key=lambda r: r["W_wing_lb"])), "Transonic: lightest Pareto wing")
+    except (OSError, ValueError, KeyError):
+        pass
+    add("wing_models/transonic/chart_wing/chart_wing.vsp3", "Transonic: chart wing")
+    for mode in ("conventional", "bwb"):
+        try:
+            for r in json.load(open(os.path.join(WM, f"gui_{mode}", "pareto_results.json"), encoding="utf-8")):
+                n = r.get("folder_name")
+                if n:
+                    add(f"wing_models/gui_{mode}/{n}/{n}.vsp3", f"{mode} #{r['solution_id']} (CL {r['CL']:.2f}, L/D {r['LD']:.1f})")
+        except (OSError, ValueError):
+            pass
+    add("system_files/presets/example_transport_wing.vsp3", "Example transport wing (preset, 210 m^2)")
+    return items
 
 
 # ─── RESULTS ─────────────────────────────────────────────────────────────────
@@ -266,7 +371,8 @@ def results(mode):
             st = json.load(open(aa, encoding="utf-8")).get("stations", [])
             table = {"columns": ["eta", "airfoil"], "rows": [[s["eta"], os.path.basename(str(s["airfoil"]))] for s in st]}
     pareto = pareto_transonic(out) if mode == "transonic" else (pareto_planform(mode, out) if mode in ("conventional", "bwb") else None)
-    return {"table": table, "images": images, "pareto": pareto}
+    paretos = pareto_airfoil(out) if mode in ("airfoil", "transonic") else None
+    return {"table": table, "images": images, "pareto": pareto, "paretos": paretos}
 
 
 # ─── HTTP ────────────────────────────────────────────────────────────────────
@@ -293,12 +399,17 @@ class Handler(BaseHTTPRequestHandler):
             html = open(os.path.join(SCRIPT_DIR, "gui", "index.html"), encoding="utf-8").read().replace("__TOKEN__", TOKEN)
             return self._send(200, html, "text/html; charset=utf-8")
         if u.path == "/api/config":
-            return self._send(200, mode_config(q["mode"][0]))
+            mode = q["mode"][0]
+            saved = load_settings().get(mode, {})
+            return self._send(200, {"config": _deep_merge(mode_config(mode), saved.get("config", {})), "options": saved.get("options", {})})
         if u.path == "/api/log":
             text, off = read_log(int(q.get("offset", ["0"])[0]))
             code = None if running() or STATE["proc"] is None else STATE["proc"].returncode
             return self._send(200, {"text": text, "offset": off, "running": running(), "label": STATE["label"], "code": code,
-                                    "secs": round(time.time() - STATE["started"]) if running() else 0})
+                                    "secs": round(time.time() - STATE["started"]) if running() else 0,
+                                    "idle": round(time.time() - os.path.getmtime(LOG)) if running() and os.path.exists(LOG) else 0})
+        if u.path == "/api/wings":
+            return self._send(200, list_wings())
         if u.path == "/api/results":
             return self._send(200, results(q["mode"][0]))
         if u.path == "/file":
@@ -317,6 +428,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, start(req))
         if self.path == "/api/stop":
             return self._send(200, stop())
+        if self.path == "/api/save":
+            return self._send(200, save_settings(req["mode"], req.get("config", {}), req.get("options", {})))
         if self.path == "/api/reset":
             return self._send(200, reset(req["mode"]))
         self._send(404, {"error": "not found"})

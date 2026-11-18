@@ -30,7 +30,8 @@ DEFAULTS = {
         "MU":      1.628e-5,   # dynamic viscosity [Pa.s]
         "S_REF":   210.0,      # reference wing area [m^2]
         "AOA":     1.0,        # analysis angle of attack [deg]
-        "INCIDENCE": 3.0,      # root incidence / built-in twist reference [deg]
+        "INCIDENCE": 3.0,      # root incidence [deg]: the whole wing is rotated by this
+        "TIP_INCIDENCE": 0.0,  # net incidence at the tip [deg]; twist is linear root -> tip (washout = INCIDENCE - TIP_INCIDENCE)
     },
     "bounds": {
         # (lower, upper) for each of the 6 design variables
@@ -73,10 +74,17 @@ DEFAULTS = {
         "MIN_TC_ROOT":  0.18,    # thickness screen for the co-opt sweep (fraction of chord)
         "MIN_TC_MID":   0.16,
         "MIN_TC_TIP":   0.12,
+        "MAX_TC_ROOT":  1.0,     # maximum t/c per zone (1.0 = no limit)
+        "MAX_TC_MID":   1.0,
+        "MAX_TC_TIP":   1.0,
         "XFOIL_MACH":   0.1,     # Mach passed to XFOIL (Karman-Tsien correction)
         "ALPHA_SPREAD": 2.0,     # +/- alpha [deg] around the local design alpha
         "CM_MIN":      -0.08,    # reject sections with avg Cm below this (conventional)
         "CM_MIN_BWB":  -0.03,    # ... and in BWB mode (self-trimming sections)
+        "STALL_CHECK": True,        # reject airfoils with an abrupt stall (post-stall XFOIL sweep on the best candidates)
+        "STALL_DELTA_ALPHA": 2.0,   # degrees past the CLmax angle at which the lift loss is measured (1-2 deg typical)
+        "STALL_DROP_MAX": 0.10,     # max fraction of CLmax lost by then; ~0.05 = gentle, ~0.10 = moderate, 0.20+ = abrupt
+        "STALL_TOPK": 40,           # how many of the best-ranked candidates get the (slower) stall sweep
     },
     # Transonic layer (transonic_opti.py / RUN_TRANSONIC.bat). Defaults = Navy jet trainer study.
     "transonic": {
@@ -88,12 +96,13 @@ DEFAULTS = {
         "NZ_LIMIT": 7.33, "NZ_ULT_FACTOR": 1.5,       # Raymer N_z = 1.5 * 7.33
         "CSW_FRAC": 0.20,            # control-surface area / wing area (Raymer S_csw)
         "KORN_KAPPA": 0.87,          # airfoil technology factor (0.87 = 64A series)
-        "KORN_CHORD_FRAC": 0.5,      # sweep used in Korn: 0.5 = half-chord (local), 0.25 = quarter-chord
+        "KORN_CHORD_FRAC": 0.25,     # sweep used in Korn: 0.25 = quarter-chord (Study 3 case), 0.5 = half-chord (lower Mdd by ~0.02)
         "MDD_MIN": 0.78, "MDD_GOAL": 0.90,
         "TC_VARIABLE": True,         # t/c root and tip are design variables
         "TC_ROOT": 0.12, "TC_TIP": 0.10,              # used when TC_VARIABLE is false
-        "BOUNDS": {"AR": [4.5, 6.5], "SWEEP_LE": [15.0, 40.0], "TAPER": [0.2, 0.6],
-                   "WASHOUT": [0.0, 5.0], "TC_ROOT": [0.10, 0.14], "TC_TIP": [0.08, 0.12]},
+        "CROOT_MIN": 2.5,            # m, minimum root chord (structural depth; competitor cr/sqrt(S) ~0.5-0.65)
+        "BOUNDS": {"AR": [4.0, 6.5], "SWEEP_LE": [26.0, 36.0], "TAPER": [0.25, 0.45],
+                   "WASHOUT": [2.5, 3.5], "TC_ROOT": [0.12, 0.14], "TC_TIP": [0.09, 0.12]},
         "AIRFOIL_ROOT": "system_files/presets/transonic/naca64a212.dat",
         "AIRFOIL_TIP":  "system_files/presets/transonic/naca64a210.dat",
         "POLAR_FILE":   "system_files/presets/transonic/polars.json",
@@ -102,17 +111,17 @@ DEFAULTS = {
         "RE_EXPONENT": -0.2,         # cd ~ Re^-0.2 to scale the polar to each strip's chord
         "STALL_MACH": 0.15,          # sea-level CL_max condition
         "CLMAX_ROOT": 1.79, "CLMAX_TIP": 1.5,         # 1.5 = conservative tip value (XFOIL gives 1.72)
-        "STALL_ETA_OUT": 0.65,       # first stall must occur inboard of this span fraction: strips outboard of it...
+        "STALL_ETA_OUT": 0.70,       # first stall must occur inboard of this span fraction: strips outboard of it...
         "STALL_MARGIN": 1.0,         # optional: outboard cl/clmax must stay below this when the first strip stalls (1.0 = off;
                                      # the VLM loading is flat there, so values < 0.99 are rarely attainable)
         "FUEL_TOTAL_LB": 3296.0, "FUEL_TOTAL_M3": 1.84, "FUEL_SHARE_MIN": 0.5,
         "CM_MAX": 0.35,
         # Raymer Fig. 4.21 'subsonic' pitch-up boundary: max AR vs quarter-chord sweep [deg].
-        # PLACEHOLDER (figure not digitized): the Study-3 chart wing (AR 5.25, 25.4 deg) lies inside it.
-        # Replace with points read off your copy of the figure.
+        # Digitized from Raymer Fig. 4.21 (book p. 82), about +-1 deg and +-0.2 AR. The transonic
+        # boundary is stricter (20/30/40/50/60 deg -> 4.7/3.7/2.8/2.0/1.4) and is not used here.
         "PITCHUP_ENABLED": True,
-        "PITCHUP_SWEEP_DEG": [0.0, 10.0, 20.0, 30.0, 40.0, 50.0],
-        "PITCHUP_AR_MAX":    [9.0, 8.0, 7.0, 6.0, 5.0, 4.0],
+        "PITCHUP_SWEEP_DEG": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        "PITCHUP_AR_MAX":    [9.2, 7.0, 5.1, 3.6, 2.4, 1.4],
     },
 }
 
@@ -129,7 +138,8 @@ PARAM_META = [
     ("flight",      "MU",          "Dynamic viscosity [Pa.s]",    "float", "Drives Reynolds number"),
     ("flight",      "S_REF",       "Reference area [m^2]",        "float", "Wing planform reference area"),
     ("flight",      "AOA",         "Angle of attack [deg]",       "float", "Analysis alpha"),
-    ("flight",      "INCIDENCE",   "Root incidence/twist [deg]",  "float", "Built-in incidence reference"),
+    ("flight",      "INCIDENCE",   "Root incidence [deg]",        "float", "Whole wing is rotated by this"),
+    ("flight",      "TIP_INCIDENCE", "Tip incidence [deg]",       "float", "Net tip incidence, e.g. root 1.5 / tip -1.5 for mean 0"),
 
     ("bounds",      "AR",          "Aspect ratio bounds",         "range", "Lower/upper aspect ratio"),
     ("bounds",      "kink_frac",   "Kink fraction bounds",        "range", "Spanwise kink location (0-1)"),
@@ -161,10 +171,17 @@ PARAM_META = [
     ("airfoil",     "MIN_TC_ROOT",   "Min t/c at root",           "float", "Thickness screen for the co-opt sweep"),
     ("airfoil",     "MIN_TC_MID",    "Min t/c mid-span",          "float", "Thickness screen for the co-opt sweep"),
     ("airfoil",     "MIN_TC_TIP",    "Min t/c at tip",            "float", "Thickness screen for the co-opt sweep"),
+    ("airfoil",     "MAX_TC_ROOT",   "Max t/c at root",           "float", "Reject thicker sections (1.0 = no limit)"),
+    ("airfoil",     "MAX_TC_MID",    "Max t/c mid-span",          "float", "Reject thicker sections (1.0 = no limit)"),
+    ("airfoil",     "MAX_TC_TIP",    "Max t/c at tip",            "float", "Reject thicker sections (1.0 = no limit)"),
     ("airfoil",     "XFOIL_MACH",    "XFOIL Mach",                "float", "Compressibility correction in XFOIL"),
     ("airfoil",     "ALPHA_SPREAD",  "Alpha spread [deg]",        "float", "+/- around the local design alpha"),
     ("airfoil",     "CM_MIN",        "Min section Cm",            "float", "Reject more nose-down sections (conventional)"),
     ("airfoil",     "CM_MIN_BWB",    "Min section Cm (BWB)",      "float", "Reject more nose-down sections (BWB)"),
+    ("airfoil",     "STALL_CHECK",   "Stall-character check",     "bool",  "Reject airfoils whose lift collapses just past CLmax"),
+    ("airfoil",     "STALL_DELTA_ALPHA", "Stall check angle [deg]", "float", "Measure the CL loss this many degrees past CLmax"),
+    ("airfoil",     "STALL_DROP_MAX", "Max CL loss past stall",   "float", "Fraction of CLmax (0.10 = 10 %)"),
+    ("airfoil",     "STALL_TOPK",    "Candidates stall-checked",  "int",   "Best-ranked airfoils that get the post-stall sweep"),
 ]
 
 

@@ -18,9 +18,9 @@ import io
 # UTF-8 console (safe for Spyder/IPython)
 try:
     if hasattr(sys.stdout, "buffer") and sys.stdout.buffer:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
     if hasattr(sys.stderr, "buffer") and sys.stderr.buffer:
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 except Exception:
     pass
 
@@ -88,6 +88,8 @@ MACH      = V_MS / np.sqrt(1.4 * 287.05 * TEMP_K)
 S_REF     = float(_fl["S_REF"])
 AOA       = float(_fl["AOA"])
 INCIDENCE = float(_fl["INCIDENCE"])
+TIP_INCIDENCE = float(_fl.get("TIP_INCIDENCE", 0.0))
+WASHOUT = INCIDENCE - TIP_INCIDENCE        # twist from root to tip [deg]
 BOUNDS    = [tuple(CFG["bounds"][k]) for k in DESIGN_KEYS]
 LD_MIN, CM_MAX, CL_MIN = float(_co["LD_MIN"]), float(_co["CM_MAX"]), float(_co["CL_MIN"])
 
@@ -144,7 +146,7 @@ def design_label(x):
 
 def build_worker_params(x, name, base_vsp, wake_iterations):
     """Everything vsp_worker.py needs for one wing, or None if infeasible."""
-    stations = geometry.planform_stations(x, S_REF, N_SECTIONS, INCIDENCE, GEO_CFG)
+    stations = geometry.planform_stations(x, S_REF, N_SECTIONS, WASHOUT, GEO_CFG)
     if stations is None:
         return None
     mac, x_le_mac = geometry.mac_reference(stations)

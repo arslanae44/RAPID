@@ -119,6 +119,29 @@ class AirfoilAssignmentTests(unittest.TestCase):
         self.assertAlmostEqual(t, 0.101, delta=0.005)
 
 
+class StallCharacterTests(unittest.TestCase):
+    def _polar(self, cls):
+        return {a: {"CL": c} for a, c in zip(range(6, 6 + len(cls)), cls)}
+
+    def test_gentle_stall(self):
+        # CLmax 1.5 at alpha 14; 2 deg later 1.47 -> 2 % loss
+        drop, a, cl = airfoil_opti.stall_drop(self._polar([0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.45, 1.48, 1.5, 1.49, 1.47]), 2.0)
+        self.assertEqual((a, cl), (14, 1.5))
+        self.assertAlmostEqual(drop, 0.02)
+
+    def test_abrupt_stall(self):
+        drop, _, _ = airfoil_opti.stall_drop(self._polar([0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.2, 1.0]), 2.0)
+        self.assertAlmostEqual(drop, (1.5 - 1.0) / 1.5)
+
+    def test_fractional_delta_interpolates(self):
+        drop, _, _ = airfoil_opti.stall_drop(self._polar([1.0, 1.2, 1.4, 1.2, 1.0]), 1.5)
+        self.assertAlmostEqual(drop, (1.4 - 1.1) / 1.4)
+
+    def test_unknown_without_post_stall_points(self):
+        self.assertIsNone(airfoil_opti.stall_drop(self._polar([0.9, 1.0, 1.1, 1.2, 1.3]), 2.0)[0])
+        self.assertIsNone(airfoil_opti.stall_drop({}, 2.0)[0])
+
+
 class StabilityTests(unittest.TestCase):
     def test_neutral_point_and_trim_transfer(self):
         import planform_opti as po
