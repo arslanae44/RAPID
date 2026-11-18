@@ -127,7 +127,7 @@ Stability and aerodynamics are evaluated **simultaneously** (one VSPAERO run yie
 
 ---
 
-## 🛩️ Transonic Layer (Navy jet trainer cruise wing)
+## 🛩️ Transonic Layer
 Run **`RUN_TRANSONIC.bat`** (or `python system_files	ransonic_opti.py --pop 40 --gens 30`) to optimize a straight-tapered wing at a transonic cruise point. Defaults are the Navy trainer of the AE451 studies: M 0.75, 35,000 ft, CL = 0.272, S = 16.73 m², NACA 64A212 root / 64A210 tip.
 
 **Design variables:** aspect ratio, leading-edge sweep, taper ratio, washout, and (optional, `--no-tc` to fix them) root and tip t/c. **Objectives:** minimize cruise `C_D,total = C_D0 + C_Di + C_Dw` and Raymer wing weight (NSGA-II Pareto front).
