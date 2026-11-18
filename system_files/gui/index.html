@@ -79,11 +79,11 @@ const MODES = [["transonic","Transonic"],["conventional","Conventional"],["bwb",
 const OPTS = {
   transonic:    [["pop","Population",40],["gens","Generations",30],["cores","Cores (blank = all)",""],["seed","Seed",1],
                  ["select","Pick from front",["range","drag","weight","weighted"]],["fresh","Fresh start",false],["no_tc","Fix t/c",false],
-                 ["airfoil","Airfoil co-opt after",false],["catalog","Airfoil catalog",["UIUC_All","Medium_Re","High_Re","Low_Re","Reflexed"]]],
+                 ["airfoil","Airfoil co-opt after",false],["catalog","Airfoil catalog",["UIUC_All","Medium_Re","High_Re","Low_Re","Reflexed","Transonic"]]],
   conventional: [["pop","Population",32],["gens","Generations",20],["cores","Cores (blank = all)",""],["fresh","Fresh start",false],["airfoil","Airfoil co-opt after",false]],
   bwb:          [["pop","Population",32],["gens","Generations",20],["cores","Cores (blank = all)",""],["fresh","Fresh start",false],["airfoil","Airfoil co-opt after",false]],
   airfoil:      [["vsp3",".vsp3 wing","system_files/presets/example_transport_wing.vsp3"],["n_sections","Stations",5],
-                 ["catalog","Catalog",["Low_Re","Medium_Re","High_Re","UIUC_All","Reflexed"]],["cores","Cores (blank = all)",""],["refine","Refine shape",false]],
+                 ["catalog","Catalog",["Low_Re","Medium_Re","High_Re","UIUC_All","Reflexed","Transonic"]],["cores","Cores (blank = all)",""],["refine","Refine shape",false]],
   check:        [],
 };
 let mode = "transonic", cfg = {}, opts = {}, offset = 0, polling = null, prog = null;

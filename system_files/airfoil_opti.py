@@ -44,7 +44,7 @@ ACTIVE_AIRFOILS_CONFIG = os.environ.get("RAPID_ACTIVE_AIRFOILS") or os.path.join
 ACTIVE_AIRFOILS_DIR = os.path.join(os.path.dirname(os.path.abspath(ACTIVE_AIRFOILS_CONFIG)), "active_airfoils")
 DEFAULT_AIRFOIL_CONFIG = os.path.join(SCRIPT_DIR, "airfoil_config.json")
 BASELINE_AIRFOIL = "naca2412"
-CATALOGS = ["Low_Re", "Medium_Re", "High_Re", "UIUC_All", "Reflexed"]
+CATALOGS = ["Low_Re", "Medium_Re", "High_Re", "UIUC_All", "Reflexed", "Transonic"]
 
 
 # ─── FLIGHT STATE ────────────────────────────────────────────────────────────
@@ -496,7 +496,7 @@ def choose_catalog(default, interactive):
         return default
     labels = {"Low_Re": "curated, low speed", "Medium_Re": "curated, general",
               "High_Re": "curated, high efficiency", "UIUC_All": "full UIUC ~1650 - recommended, slow",
-              "Reflexed": "tailless / BWB self-trimming"}
+              "Reflexed": "tailless / BWB self-trimming", "Transonic": "SC(2), 64A/65, RAE, Whitcomb, NLR, CAST"}
     print("\nAirfoil catalogs:")
     for i, c in enumerate(CATALOGS, 1):
         print(f"  [{i}] {c:<10} ({labels[c]})")
